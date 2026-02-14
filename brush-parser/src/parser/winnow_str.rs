@@ -32,7 +32,7 @@ pub use context::{ParseContext, PositionTracker};
 pub use line_parsers::{linebreak, newline_list, separator, separator_op, spaces as line_spaces};
 pub use types::{PError, StrStream};
 pub use word_parsers::{
-    arithmetic_expansion, backtick_substitution, braced_variable, command_substitution,
+    arithmetic_expansion, backtick_substitution, bare_word, braced_variable, command_substitution,
     simple_variable, special_parameter,
 };
 
@@ -50,21 +50,6 @@ pub use word_parsers::{
 ///
 /// Note: '{' and '}' ARE allowed in words for brace expansion (e.g., {1..10}, {a,b,c})
 /// Brace groups ({ commands; }) are distinguished by requiring whitespace after '{' and before '}'
-///
-/// Note: Shell keywords (if, then, fi, etc.) are NOT excluded here because they
-/// can be used as regular words in non-keyword contexts (e.g., "echo done").
-/// The `command()` parser tries compound commands first, so keywords in keyword
-/// positions will be matched by compound command parsers before `bare_word` sees them.
-pub fn bare_word<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
-    take_while(1.., |c: char| {
-        !matches!(
-            c,
-            ' ' | '\t' | '\n' | '\r' |  // Whitespace
-            '|' | '&' | ';' | '<' | '>' | '(' | ')' |  // Operators (note: { } removed to allow brace expansion)
-            '$' | '`' | '\'' | '"' | '\\' // Quote/expansion starts
-        )
-    })
-}
 
 /// Check if a string is a shell reserved word
 ///
