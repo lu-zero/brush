@@ -7,8 +7,9 @@ use winnow::error::ContextError;
 use winnow::prelude::*;
 
 use crate::ast;
-use crate::parser::winnow_str::{char_parsers, context::ParseContext, types::PError, word_parsers};
+use crate::parser::winnow_str::context::PositionTracker;
 use crate::parser::winnow_str::types::StrStream;
+use crate::parser::winnow_str::{context::ParseContext, types::PError, word_parsers};
 
 /// Parse an I/O file descriptor number
 pub fn io_number<'a>() -> impl Parser<StrStream<'a>, i32, PError> {
@@ -96,7 +97,7 @@ fn here_document_content(
     input: &mut StrStream<'_>,
     delimiter: &str,
     remove_tabs: bool,
-    tracker: &ParseContext<'_>,
+    tracker: &PositionTracker,
 ) -> Result<ast::Word, PError> {
     let start_offset = tracker.offset_from_locating(input);
     let mut content = String::new();
@@ -205,7 +206,7 @@ fn here_document_marker<'a>() -> impl Parser<StrStream<'a>, PendingHereDoc, PErr
 fn resolve_here_document(
     input: &mut StrStream<'_>,
     pending: PendingHereDoc,
-    tracker: &ParseContext<'_>,
+    tracker: &PositionTracker,
 ) -> Result<(Option<i32>, ast::IoHereDocument), winnow::error::ErrMode<ContextError>> {
     let doc = here_document_content(
         input,
@@ -229,7 +230,7 @@ fn resolve_here_document(
 /// Returns a vector of resolved here-documents and optional trailing content.
 #[allow(clippy::type_complexity)]
 pub(crate) fn here_documents<'a>(
-    tracker: &'a ParseContext<'a>,
+    tracker: &'a PositionTracker,
 ) -> impl Parser<StrStream<'a>, (Vec<(Option<i32>, ast::IoHereDocument)>, Option<&'a str>), PError> + 'a
 {
     move |input: &mut StrStream<'a>| {
@@ -289,7 +290,7 @@ pub(crate) fn here_documents<'a>(
 }
 
 fn here_document<'a>(
-    tracker: &'a ParseContext<'a>,
+    tracker: &'a PositionTracker,
 ) -> impl Parser<StrStream<'a>, (Option<i32>, ast::IoHereDocument, Option<&'a str>), PError> + 'a {
     move |input: &mut StrStream<'a>| {
         // Use the multi-heredoc parser but only return the first one
@@ -319,14 +320,17 @@ pub struct IoRedirectResult<'a> {
 /// Corresponds to: winnow.rs `io_file()` + `io_redirect()`
 pub fn io_redirect<'a>(
     ctx: &'a ParseContext<'a>,
-    tracker: &'a ParseContext<'a>,
+    tracker: &'a PositionTracker,
 ) -> impl Parser<StrStream<'a>, IoRedirectResult<'a>, PError> + 'a {
     move |input: &mut StrStream<'a>| {
         winnow::combinator::alt((
             // Try OutputAndError redirects first (&>> and &>)
             (
                 "&>>",
-                winnow::combinator::preceded(super::char_parsers::spaces(), word_parsers::word_as_ast(ctx, tracker)),
+                winnow::combinator::preceded(
+                    super::char_parsers::spaces(),
+                    word_parsers::word_as_ast(ctx, tracker),
+                ),
             )
                 .map(|(_, target)| IoRedirectResult {
                     redirect: ast::IoRedirect::OutputAndError(target, true),
@@ -334,7 +338,10 @@ pub fn io_redirect<'a>(
                 }),
             (
                 "&>",
-                winnow::combinator::preceded(super::char_parsers::spaces(), word_parsers::word_as_ast(ctx, tracker)),
+                winnow::combinator::preceded(
+                    super::char_parsers::spaces(),
+                    word_parsers::word_as_ast(ctx, tracker),
+                ),
             )
                 .map(|(_, target)| IoRedirectResult {
                     redirect: ast::IoRedirect::OutputAndError(target, false),
@@ -344,7 +351,10 @@ pub fn io_redirect<'a>(
             (
                 winnow::combinator::opt(io_number()),
                 "<<<",
-                winnow::combinator::preceded(super::char_parsers::spaces(), word_parsers::word_as_ast(ctx, tracker)),
+                winnow::combinator::preceded(
+                    super::char_parsers::spaces(),
+                    word_parsers::word_as_ast(ctx, tracker),
+                ),
             )
                 .map(|(fd, _, word)| IoRedirectResult {
                     redirect: ast::IoRedirect::HereString(fd, word),
@@ -397,12 +407,13 @@ pub fn io_redirect<'a>(
 /// Corresponds to: winnow.rs `redirect_list()`
 pub fn redirect_list<'a>(
     ctx: &'a ParseContext<'a>,
-    tracker: &'a ParseContext<'a>,
+    tracker: &'a PositionTracker,
 ) -> impl Parser<StrStream<'a>, ast::RedirectList, PError> + 'a {
     move |input: &mut StrStream<'a>| {
         repeat::<_, _, Vec<_>, _, _>(
             1..,
-            winnow::combinator::preceded(super::char_parsers::spaces(), io_redirect(ctx, tracker)).map(|r| r.redirect), // Extract just the redirect, ignore trailing content
+            winnow::combinator::preceded(super::char_parsers::spaces(), io_redirect(ctx, tracker))
+                .map(|r| r.redirect), // Extract just the redirect, ignore trailing content
         )
         .map(ast::RedirectList)
         .parse_next(input)
@@ -412,7 +423,7 @@ pub fn redirect_list<'a>(
 // Reference process_substitution from the main module
 fn process_substitution<'a>(
     ctx: &'a ParseContext<'a>,
-    tracker: &'a ParseContext<'a>,
+    tracker: &'a PositionTracker,
 ) -> impl Parser<StrStream<'a>, (ast::ProcessSubstitutionKind, ast::SubshellCommand), PError> + 'a {
     super::process_substitution(ctx, tracker)
 }
