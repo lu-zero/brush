@@ -6,8 +6,12 @@
 #![allow(dead_code)]
 
 // Declare submodules
+mod and_or_parsers;
+mod arithmetic_parsers;
 mod char_parsers;
 mod command_parsers;
+mod compound_parsers;
+mod control_flow_parsers;
 mod context;
 mod line_parsers;
 mod pipeline_parsers;
