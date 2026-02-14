@@ -108,7 +108,7 @@ Each commit should be followed by `cargo fmt` and basic testing.
 
 ## Current Refactoring Status
 
-### ✅ Completed (16/18 tasks)
+### ✅ Completed (17/18 tasks)
 - [x] Create `winnow_str/` directory for submodules
 - [x] Add module declarations to `winnow_str.rs`
 - [x] Create context.rs and types.rs submodules
@@ -124,6 +124,7 @@ Each commit should be followed by `cargo fmt` and basic testing.
 - [x] Create command_parsers.rs module for command parsing (Tier 3)
 - [x] Create pipeline_parsers.rs module for pipeline parsing (Tier 4)
 - [x] Create and_or_parsers.rs module for and/or list parsing (Tier 5)
+- [x] Create compound_parsers.rs module for compound commands (Tier 10)
 
 ### ⏳ Not Started
 - [ ] Move pipeline and and/or parsers
@@ -134,8 +135,8 @@ Each commit should be followed by `cargo fmt` and basic testing.
 - [ ] Final validation and cleanup
 
 ### 📊 Progress Metrics
-- **Functions moved**: ~70/70+ functions (98%)
-- **Modules created**: 9/12 planned modules (75%)
+- **Functions moved**: ~80/80+ functions (99%)
+- **Modules created**: 10/12 planned modules (83%)
 - **Test status**: ✅ Compilation successful, core functionality working
 - **Lines reduced**: `winnow_str.rs` significantly reduced from 2000+ lines
 
@@ -145,5 +146,6 @@ Each commit should be followed by `cargo fmt` and basic testing.
 3. ✅ Completed command parsers refactoring (Tier 3)
 4. ✅ Completed pipeline parsers refactoring (Tier 4)
 5. ✅ Completed and/or parsers refactoring (Tier 5)
-6. ⏳ Continue with compound parsers (Tier 10)
-7. Finalize documentation and cleanup
+6. ✅ Completed compound parsers refactoring (Tier 10)
+7. ⏳ Create remaining modules (control_flow, arithmetic, extended_test, function, program)
+8. Finalize documentation and cleanup
