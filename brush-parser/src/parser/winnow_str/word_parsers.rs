@@ -7,11 +7,16 @@ use winnow::prelude::*;
 use winnow::stream::{LocatingSlice, Offset};
 use winnow::token::take_while;
 
+use crate::ast;
+
 /// Type alias for parser error
 pub type PError = winnow::error::ErrMode<ContextError>;
 
 /// Type alias for input stream
 pub type StrStream<'a> = LocatingSlice<&'a str>;
+
+// Re-export char parsers that we need
+use super::char_parsers::peek_char;
 
 /// Parse a bare word (literal characters only, no quotes or expansions)
 /// Corresponds to the `literal_chars` part of tokenizer's word parsing
@@ -37,6 +42,83 @@ pub fn bare_word<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
             '$' | '`' | '\'' | '"' | '\\' // Quote/expansion starts
         )
     })
+}
+
+/// Parse a word (one or more word parts combined)
+/// Handles quoted strings, escapes, and bare text
+/// Corresponds to: tokenizer's word parsing + winnow.rs `word_as_ast()`
+pub fn word_as_ast<'a>(
+    ctx: &'a super::context::ParseContext<'a>,
+    tracker: &'a super::context::PositionTracker,
+) -> impl Parser<StrStream<'a>, ast::Word, PError> + 'a {
+    move |input: &mut StrStream<'a>| {
+        let start_offset = tracker.offset_from_locating(input);
+
+        // Check for tilde at word start if enabled
+        let mut value: Cow<'_, str> = Cow::Borrowed("");
+        let mut last_char = None;
+
+        if ctx.options.tilde_expansion_at_word_start {
+            if peek_char().parse_next(input).ok() == Some('~') {
+                if let Ok(tilde_expr) = super::char_parsers::tilde_expansion().parse_next(input) {
+                    last_char = tilde_expr.chars().last();
+                    value = Cow::Borrowed(tilde_expr);
+                }
+            }
+        }
+
+        // Parse remaining word parts, tracking last character for tilde-after-colon detection
+        while let Ok(part) = word_part(ctx, last_char).parse_next(input) {
+            // Update last_char efficiently - just get the last char of the new part
+            last_char = part.chars().last().or(last_char);
+
+            // Optimize: avoid allocation if this is the first and only part
+            if value.is_empty() {
+                value = part;
+            } else {
+                // Need to combine parts - must allocate
+                value.to_mut().push_str(&part);
+            }
+        }
+
+        // Must have at least one character
+        if value.is_empty() {
+            return Err(winnow::error::ErrMode::Backtrack(ContextError::default()));
+        }
+
+        let end_offset = tracker.offset_from_locating(input);
+        let loc = tracker.range_to_span(start_offset..end_offset);
+
+        Ok(ast::Word {
+            value: value.into_owned(),
+            loc: Some(loc),
+        })
+    }
+}
+
+/// Parse a wordlist (one or more words separated by spaces)
+/// Corresponds to: winnow.rs `wordlist()`
+pub fn wordlist<'a>(
+    ctx: &'a super::context::ParseContext<'a>,
+    tracker: &'a super::context::PositionTracker,
+) -> impl Parser<StrStream<'a>, Vec<ast::Word>, PError> + 'a {
+    move |input: &mut StrStream<'a>| {
+        winnow::combinator::separated(
+            1..,
+            word_as_ast(ctx, tracker),
+            super::char_parsers::spaces1(),
+        )
+        .parse_next(input)
+    }
+}
+
+/// Parse a non-reserved word (for use as command names)
+/// Reserved words cannot be used as command names in simple commands
+pub fn non_reserved_word<'a>(
+    ctx: &'a super::context::ParseContext<'a>,
+    tracker: &'a super::context::PositionTracker,
+) -> impl Parser<StrStream<'a>, ast::Word, PError> + 'a {
+    word_as_ast(ctx, tracker).verify(|word: &ast::Word| !is_reserved_word(&word.value))
 }
 
 /// Parse a simple variable reference: $VAR

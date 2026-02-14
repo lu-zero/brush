@@ -5,35 +5,385 @@
 
 #![allow(dead_code)]
 
-// Declare submodules
-mod char_parsers;
-mod context;
-mod line_parsers;
-mod types;
-mod word_parsers;
+use std::borrow::Cow;
 
-use winnow::combinator::{dispatch, fail, repeat};
+use winnow::combinator::{dispatch, fail, peek, repeat};
 use winnow::error::ContextError;
 use winnow::prelude::*;
-use winnow::stream::LocatingSlice;
+use winnow::stream::{LocatingSlice, Offset};
 use winnow::token::take_while;
 
-use crate::ast;
+use crate::ast::{self, SeparatorOperator};
 use crate::parser::{ParserOptions, SourceInfo};
+use crate::source::{SourcePosition, SourceSpan};
 
-// Re-export public items from submodules
-pub use char_parsers::{
-    array_spaces, comment, extglob_pattern, newline, parse_balanced_delimiters, peek_char,
-    peek_op2, peek_op3, spaces, spaces1, tilde_expansion,
-};
-pub use context::{ParseContext, PositionTracker};
-pub use line_parsers::{linebreak, newline_list, separator, separator_op, spaces as line_spaces};
-pub use types::{PError, StrStream};
-pub use word_parsers::{
-    arithmetic_expansion, backtick_substitution, bare_word, braced_variable, command_substitution,
-    double_quoted_string, escape_sequence, is_reserved_word, non_reserved_word, simple_variable,
-    single_quoted_string, special_parameter, word_as_ast, word_part, wordlist,
-};
+/// Type alias for parser error
+type PError = winnow::error::ErrMode<ContextError>;
+
+/// Type alias for input stream
+pub type StrStream<'a> = LocatingSlice<&'a str>;
+
+/// Context for parsing - holds options and source info
+#[derive(Clone)]
+pub struct ParseContext<'a> {
+    /// Parser options controlling extended globbing, POSIX mode, etc.
+    pub options: &'a ParserOptions,
+    /// Source file information for error reporting
+    pub source_info: &'a SourceInfo,
+    /// Pending trailing content from here-docs that needs to be parsed as pipeline continuation
+    /// (e.g., "| grep hello" from "cat <<EOF | grep hello")
+    pub pending_heredoc_trailing: &'a std::cell::RefCell<Option<&'a str>>,
+}
+
+// ============================================================================
+// Position Tracking
+// ============================================================================
+
+/// Helper struct to track position in the input while parsing
+///
+/// OPTIMIZATION: Uses line break caching + binary search for fast line/column lookup.
+/// Instead of O(n) scanning for each position, we:
+/// 1. Cache all line break positions during initialization (O(n) once)
+/// 2. Use binary search for line lookup (O(log m) per position, m = number of lines)
+///
+/// This provides 100-2600x speedup for medium/large files!
+#[derive(Debug, Clone)]
+pub struct PositionTracker {
+    /// Cached positions of all newline characters in the input.
+    /// Allows O(log m) line number lookup via binary search.
+    line_breaks: Vec<usize>,
+    /// Cache original length for manual offset calculations (when not using `LocatingSlice`)
+    #[allow(dead_code)]
+    original_len: usize,
+}
+
+impl PositionTracker {
+    /// Creates a new `PositionTracker` for the given input string.
+    ///
+    /// Performs a one-time O(n) scan to cache all line break positions,
+    /// enabling O(log m) line number lookups for the rest of parsing.
+    #[allow(dead_code)]
+    pub fn new(input: &str) -> Self {
+        // One-time O(n) scan to cache all line break positions
+        // This enables O(log m) lookups for the rest of parsing
+        let line_breaks: Vec<usize> = input
+            .bytes()
+            .enumerate()
+            .filter_map(|(i, b)| if b == b'\n' { Some(i) } else { None })
+            .collect();
+
+        Self {
+            line_breaks,
+            original_len: input.len(),
+        }
+    }
+
+    /// Get current offset from `LocatingSlice`
+    #[inline]
+    fn offset_from_locating(&self, input: &LocatingSlice<&str>) -> usize {
+        self.original_len - input.len()
+    }
+
+    /// Calculate source position from byte offset using binary search
+    ///
+    /// Complexity: O(log m) where m = number of lines (vs O(n) before)
+    fn position_at(&self, offset: usize) -> SourcePosition {
+        // Binary search to find which line this offset is on
+        // line_breaks[i] is the position of the i-th newline
+        // Line numbering: line 1 is before first newline, line 2 is before second newline, etc.
+        let line = match self.line_breaks.binary_search(&offset) {
+            // Found exact newline character - it belongs to the line it ends
+            Ok(pos) => pos + 1,
+            // Not found - pos is where it would be inserted, so pos is the line number
+            Err(pos) => pos + 1,
+        };
+
+        // Calculate column as offset from start of line
+        let line_start = if line > 1 {
+            // Previous line ended at line_breaks[line-2], so this line starts after that
+            self.line_breaks[line - 2] + 1
+        } else {
+            // Line 1 starts at position 0
+            0
+        };
+
+        SourcePosition {
+            index: offset,
+            line,
+            column: offset.saturating_sub(line_start) + 1,
+        }
+    }
+
+    /// Convert a byte range to a `SourceSpan` (for use with `LocatingSlice`)
+    ///
+    /// This is the primary method when using `LocatingSlice.with_span()`
+    #[inline]
+    fn range_to_span(&self, range: std::ops::Range<usize>) -> SourceSpan {
+        SourceSpan {
+            start: self.position_at(range.start).into(),
+            end: self.position_at(range.end).into(),
+        }
+    }
+}
+
+// ============================================================================
+// Tier 0: Character-level parsers (leaf functions)
+// ============================================================================
+
+/// Helper: Peek at next 1-2 operator characters for dispatch
+fn peek_op2<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
+    peek(winnow::token::take_while(1..=2, |c: char| {
+        matches!(c, '<' | '>' | '&' | '|')
+    }))
+}
+
+/// Helper: Peek at next 2-3 operator characters for case terminators
+fn peek_op3<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
+    peek(winnow::token::take_while(2..=3, |c: char| {
+        matches!(c, ';' | '&')
+    }))
+}
+
+/// Helper: Peek at first character for `word_part` dispatch
+fn peek_char<'a>() -> impl Parser<StrStream<'a>, char, PError> {
+    peek(winnow::token::any)
+}
+
+/// Parse an extended glob pattern: @(...), +(...), *(...), ?(...), !(...)
+/// Returns the entire pattern including the prefix and parentheses
+fn extglob_pattern<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
+    move |input: &mut StrStream<'a>| {
+        // Save starting checkpoint to capture the prefix char too
+        let start = input.checkpoint();
+
+        // Match the prefix character (@, !, ?, +, *)
+        let _prefix_char = winnow::token::one_of(['@', '!', '?', '+', '*']).parse_next(input)?;
+
+        // Use the helper to parse balanced parens starting from the '('
+        let _balanced = parse_balanced_delimiters("(", Some('('), ')', 1).parse_next(input)?;
+
+        // Get the full pattern including prefix character
+        let end = input.checkpoint();
+        let consumed_len = end.offset_from(&start);
+
+        input.reset(&start);
+        let pattern = winnow::token::take(consumed_len).parse_next(input)?;
+
+        Ok(pattern)
+    }
+}
+
+// ============================================================================
+// Helper: Balanced Delimiter Parsing
+// ============================================================================
+
+/// Parse content with balanced delimiters (parentheses, braces, backticks)
+/// Returns the full slice including opening and closing delimiters
+///
+/// # Parameters
+/// - `prefix`: The opening delimiter(s) to match first (e.g., "$(", "${", backtick)
+/// - `open_char`: Character that increases depth (e.g., '(' or '{'), or None for backticks
+/// - `close_char`: Character that decreases depth (e.g., ')' or '}' or backtick)
+/// - `initial_depth`: Starting depth (e.g., 1 for most, 2 for arithmetic `$((`)
+///
+/// # Examples
+/// - Command substitution: `parse_balanced_delimiters("$(", Some('('), ')', 1)`
+/// - Arithmetic: `parse_balanced_delimiters("$((", Some('('), ')', 2)`
+/// - Braced variable: `parse_balanced_delimiters("${", Some('{'), '}', 1)`
+/// - Backtick: `parse_balanced_delimiters("`", None, '`', 1)`
+fn parse_balanced_delimiters<'a>(
+    prefix: &'a str,
+    open_char: Option<char>,
+    close_char: char,
+    initial_depth: usize,
+) -> impl Parser<StrStream<'a>, &'a str, PError> + 'a {
+    move |input: &mut StrStream<'a>| {
+        let start = input.checkpoint();
+
+        // Match opening prefix - use winnow's literal parser
+        winnow::token::literal(prefix).parse_next(input)?;
+
+        // Parse balanced delimiters
+        let mut depth = initial_depth;
+
+        while depth > 0 {
+            match winnow::token::any::<_, PError>.parse_next(input) {
+                Ok(ch) if Some(ch) == open_char => {
+                    depth += 1;
+                }
+                Ok(ch) if ch == close_char => {
+                    depth -= 1;
+                }
+                Ok('\\') => {
+                    // Skip escaped character
+                    let _ = winnow::token::any::<_, PError>.parse_next(input);
+                }
+                Ok(_) => {
+                    // Regular character
+                }
+                Err(_) => {
+                    // Hit end of input without closing delimiter
+                    return Err(winnow::error::ErrMode::Backtrack(ContextError::default()));
+                }
+            }
+        }
+
+        // Get the full slice from start to current position
+        let end = input.checkpoint();
+        let consumed_len = end.offset_from(&start);
+
+        input.reset(&start);
+        let result = winnow::token::take(consumed_len).parse_next(input)?;
+
+        Ok(result)
+    }
+}
+
+/// Check if character is valid in a username for tilde expansion
+/// POSIX portable filename characters: alphanumeric, dot, underscore, hyphen, plus
+const fn is_username_char(c: char) -> bool {
+    matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '-' | '+')
+}
+
+/// Parse a tilde expansion: ~, ~user, ~+, ~-, ~+N, ~-N
+/// Returns the entire tilde expression as a string
+fn tilde_expansion<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
+    (
+        '~',
+        take_while(0.., is_username_char),
+        peek(winnow::combinator::alt((
+            winnow::combinator::eof.void(),
+            winnow::token::one_of(['/', ':', ';', '}', ' ', '\t', '\n', '&', '|', '<', '>']).void(),
+        ))),
+    )
+        .take()
+}
+
+/// Parse a newline character
+/// Corresponds to: `matches_operator("\n`") in winnow.rs
+#[inline]
+pub fn newline<'a>() -> impl Parser<StrStream<'a>, char, PError> {
+    '\n'
+}
+
+/// Parse a comment: # to end of line (not including newline)
+/// Comments start with # and continue to end of line
+/// The # must appear at a word boundary (start of input or after whitespace)
+#[inline]
+fn comment<'a>() -> impl Parser<StrStream<'a>, (), PError> {
+    ('#', take_while(0.., |c: char| c != '\n')).void()
+}
+
+/// Parse optional whitespace and comments (spaces, tabs, and comments, but NOT newlines)
+///
+/// Handles both inter-token spaces, inline comments, and backslash-newline
+/// continuations like: `echo hello # comment` or `cmd \<NL> arg`.
+/// This is needed to separate tokens on the same line.
+#[inline]
+pub fn spaces<'a>() -> impl Parser<StrStream<'a>, (), PError> {
+    repeat::<_, _, (), _, _>(
+        0..,
+        winnow::combinator::alt((
+            take_while(1.., |c: char| c == ' ' || c == '\t').void(),
+            ("\\", '\n').void(), // backslash-newline continuation
+            comment(),
+        )),
+    )
+    .void()
+}
+
+/// Parse required whitespace (at least one space or tab, optionally followed by comment)
+#[inline]
+pub fn spaces1<'a>() -> impl Parser<StrStream<'a>, (), PError> {
+    (
+        take_while(1.., |c: char| c == ' ' || c == '\t'), // Required spaces
+        winnow::combinator::opt(comment()),               // Optional comment after spaces
+    )
+        .void()
+}
+
+/// Parse whitespace inside array literals `( ... )`.
+/// Newlines are treated as whitespace separators, just like spaces and tabs.
+/// Also handles comments and backslash-newline continuations.
+#[inline]
+fn array_spaces<'a>() -> impl Parser<StrStream<'a>, (), PError> {
+    repeat::<_, _, (), _, _>(
+        0..,
+        winnow::combinator::alt((
+            take_while(1.., |c: char| c == ' ' || c == '\t' || c == '\n').void(),
+            ("\\", '\n').void(),
+            comment(),
+        )),
+    )
+    .void()
+}
+
+// ============================================================================
+// Tier 1: Line breaks and separators
+// ============================================================================
+
+/// Parse linebreak (zero or more newlines, with optional comments before each newline)
+/// Corresponds to: winnow.rs `linebreak()`
+/// Handles blank lines, comment-only lines, and lines with inline comments
+#[inline]
+pub fn linebreak<'a>() -> impl Parser<StrStream<'a>, (), PError> {
+    repeat::<_, _, (), _, _>(
+        0..,
+        (
+            take_while(0.., |c: char| c == ' ' || c == '\t'), // Optional leading spaces
+            winnow::combinator::opt(comment()),               // Optional comment
+            newline(),                                        // Required newline
+        )
+            .void(),
+    )
+}
+
+/// Parse newline list (one or more newlines, with optional comments before each newline)
+/// Corresponds to: winnow.rs `newline_list()`
+/// Handles blank lines, comment-only lines, and lines with inline comments
+#[inline]
+pub fn newline_list<'a>() -> impl Parser<StrStream<'a>, (), PError> {
+    repeat::<_, _, (), _, _>(
+        1..,
+        (
+            take_while(0.., |c: char| c == ' ' || c == '\t'), // Optional leading spaces
+            winnow::combinator::opt(comment()),               // Optional comment
+            newline(),                                        // Required newline
+        )
+            .void(),
+    )
+}
+
+/// Parse separator operator (';' or '&')
+/// Must NOT be part of a longer operator like ';;', ';&', '&&', etc.
+/// Corresponds to: winnow.rs `separator_op()`
+#[inline]
+pub fn separator_op<'a>() -> impl Parser<StrStream<'a>, SeparatorOperator, PError> {
+    winnow::combinator::alt((
+        // Match ';' but not if followed by another ';' or '&' (to avoid matching ";;" or ";&")
+        winnow::combinator::terminated(
+            ';',
+            winnow::combinator::peek(winnow::combinator::not(winnow::token::one_of([';', '&']))),
+        )
+        .value(SeparatorOperator::Sequence),
+        // Match '&' but not if followed by another '&' (to avoid matching "&&")
+        winnow::combinator::terminated('&', winnow::combinator::peek(winnow::combinator::not('&')))
+            .value(SeparatorOperator::Async),
+    ))
+}
+
+/// Parse separator (`separator_op` with linebreak, or `newline_list`)
+/// Returns Option<SeparatorOperator> - None means it was just newlines
+/// Corresponds to: winnow.rs `separator()` and peg.rs `separator()`
+#[inline]
+fn separator<'a>() -> impl Parser<StrStream<'a>, Option<SeparatorOperator>, PError> {
+    winnow::combinator::alt((
+        // separator_op followed by optional linebreaks
+        (separator_op(), linebreak()).map(|(sep, ())| Some(sep)),
+        // OR just one or more newlines (acts as sequence separator)
+        newline_list().map(|()| None),
+    ))
+}
 
 // ============================================================================
 // Tier 2: Word parsing
@@ -49,12 +399,60 @@ pub use word_parsers::{
 ///
 /// Note: '{' and '}' ARE allowed in words for brace expansion (e.g., {1..10}, {a,b,c})
 /// Brace groups ({ commands; }) are distinguished by requiring whitespace after '{' and before '}'
+///
+/// Note: Shell keywords (if, then, fi, etc.) are NOT excluded here because they
+/// can be used as regular words in non-keyword contexts (e.g., "echo done").
+/// The `command()` parser tries compound commands first, so keywords in keyword
+/// positions will be matched by compound command parsers before `bare_word` sees them.
+pub fn bare_word<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
+    take_while(1.., |c: char| {
+        !matches!(
+            c,
+            ' ' | '\t' | '\n' | '\r' |  // Whitespace
+            '|' | '&' | ';' | '<' | '>' | '(' | ')' |  // Operators (note: { } removed to allow brace expansion)
+            '$' | '`' | '\'' | '"' | '\\' // Quote/expansion starts
+        )
+    })
+}
 
 /// Check if a string is a shell reserved word
 ///
 /// Note: This list matches the PEG parser's reserved word list.
 /// "time" and "coproc" are bash reserved words but are NOT included here
 /// to match PEG parser behavior (which allows them as command names).
+fn is_reserved_word(s: &str) -> bool {
+    matches!(
+        s,
+        "if" | "then"
+            | "else"
+            | "elif"
+            | "fi"
+            | "do"
+            | "done"
+            | "while"
+            | "until"
+            | "for"
+            | "in"
+            | "case"
+            | "esac"
+            | "function"
+            | "{"
+            | "}"
+            | "!"
+            | "[["
+            | "]]"
+            | "select"
+    )
+}
+
+/// Parse a non-reserved word (for use as command names)
+/// Reserved words cannot be used as command names in simple commands
+fn non_reserved_word<'a>(
+    ctx: &'a ParseContext<'a>,
+    tracker: &'a PositionTracker,
+) -> impl Parser<StrStream<'a>, ast::Word, PError> + 'a {
+    word_as_ast(ctx, tracker).verify(|word: &ast::Word| !is_reserved_word(&word.value))
+}
 
 // ============================================================================
 // Tier 9: Variable Expansions
@@ -62,16 +460,262 @@ pub use word_parsers::{
 
 /// Parse a simple variable reference: $VAR
 /// Returns the expansion text including the $
+pub fn simple_variable<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
+    (
+        '$',
+        winnow::token::take_while(1.., |c: char| c.is_alphanumeric() || c == '_'),
+    )
+        .take()
+}
+
+/// Parse a braced variable reference: ${VAR}
+/// Returns the expansion text including ${ }
+pub fn braced_variable<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
+    parse_balanced_delimiters("${", Some('{'), '}', 1)
+}
+
+/// Parse an arithmetic expansion: $((expr))
+/// Returns the expansion text including $(( ))
+pub fn arithmetic_expansion<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
+    parse_balanced_delimiters("$((", Some('('), ')', 2)
+}
+
+/// Parse a command substitution: $(cmd)
+/// Returns the expansion text including $( )
+pub fn command_substitution<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
+    // Need to be careful: $(( is arithmetic, $( is command substitution
+    winnow::combinator::preceded(
+        winnow::combinator::peek(winnow::combinator::not("$((")),
+        parse_balanced_delimiters("$(", Some('('), ')', 1),
+    )
+}
+
+/// Parse a backtick command substitution: `cmd`
+/// Returns the expansion text including backticks
+pub fn backtick_substitution<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
+    parse_balanced_delimiters("`", None, '`', 1)
+}
+
+/// Parse special parameter: $0, $1, $?, $@, etc.
+/// Returns the expansion text including the $
+pub fn special_parameter<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
+    (
+        '$',
+        winnow::combinator::alt((
+            winnow::token::one_of(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']),
+            winnow::token::one_of(['?', '@', '*', '#', '$', '!', '-', '_']),
+        )),
+    )
+        .take()
+}
+
+// ============================================================================
+// Tier 7: Quoted Strings
 // ============================================================================
 
 /// Parse a single-quoted string: 'text'
 /// In single quotes, everything is literal except the closing quote
 /// Returns the full string including quotes (e.g., "'text'")
+pub fn single_quoted_string<'a>() -> impl Parser<StrStream<'a>, String, PError> {
+    ('\'', take_while(0.., |c: char| c != '\''), '\'')
+        .take()
+        .map(|s: &str| s.to_string())
+}
+
+/// Parse a double-quoted string: "text".
+///
+/// Returns the full string including quotes (e.g., `"text"`).
+/// Handles backslash escape sequences and `$(...)` command substitutions
+/// (which may span multiple lines for heredocs) inside the string.
+pub fn double_quoted_string<'a>() -> impl Parser<StrStream<'a>, String, PError> {
+    move |input: &mut StrStream<'a>| {
+        let start = input.checkpoint();
+
+        // Match opening quote
+        '"'.parse_next(input)?;
+
+        loop {
+            // Try to match closing quote
+            if winnow::combinator::opt::<_, _, PError, _>('"')
+                .parse_next(input)?
+                .is_some()
+            {
+                break;
+            }
+
+            match winnow::token::any::<_, PError>.parse_next(input) {
+                Ok('\\') => {
+                    // Escape sequence: skip the next character
+                    let _ = winnow::token::any::<_, PError>.parse_next(input);
+                }
+                Ok('$') => {
+                    // Check if this starts a $(...) command substitution (not
+                    // $((...)) arithmetic). If so, we MUST consume it as a
+                    // balanced unit because the body can span multiple lines
+                    // (e.g., heredocs). If the closing `)` is missing, that's a
+                    // hard error — not optional.
+                    if winnow::combinator::peek::<_, _, PError, _>(winnow::combinator::not("(("))
+                        .parse_next(input)
+                        .is_ok()
+                        && winnow::combinator::peek::<_, _, PError, _>('(')
+                            .parse_next(input)
+                            .is_ok()
+                    {
+                        // Committed: $( was detected, must find closing )
+                        parse_balanced_delimiters("(", Some('('), ')', 1)
+                            .void()
+                            .parse_next(input)?;
+                    }
+                    // Otherwise $ was just a plain character — already consumed.
+                }
+                Ok('`') => {
+                    // Backtick substitution — consume until matching backtick
+                    let _: Result<&str, PError> =
+                        take_while(0.., |c: char| c != '`').parse_next(input);
+                    let _ = winnow::combinator::opt::<_, _, PError, _>('`').parse_next(input);
+                }
+                Ok(_) => {
+                    // Regular character — already consumed
+                }
+                Err(_) => {
+                    // Hit end of input without closing quote
+                    return Err(winnow::error::ErrMode::Backtrack(ContextError::default()));
+                }
+            }
+        }
+
+        // Get the full slice from start to current position
+        let end = input.checkpoint();
+        let consumed_len = end.offset_from(&start);
+        input.reset(&start);
+        let result: &str = winnow::token::take(consumed_len).parse_next(input)?;
+
+        Ok(result.to_string())
+    }
+}
+
+/// Parse an escape sequence: \c
+/// Returns the escaped character (simplified version)
+pub fn escape_sequence<'a>() -> impl Parser<StrStream<'a>, char, PError> {
+    winnow::combinator::preceded(
+        '\\',
+        winnow::token::any, // For now, just return the escaped character as-is
+    )
+}
 
 /// Parse a word part (bare text, single quote, double quote, escape, or expansion)
+/// Returns the string value of the part
+/// The `last_char` parameter helps detect tilde-after-colon
+fn word_part<'a>(
+    ctx: &'a ParseContext<'a>,
+    last_char: Option<char>,
+) -> impl Parser<StrStream<'a>, Cow<'a, str>, PError> + 'a {
+    move |input: &mut StrStream<'a>| {
+        // Fast path: dispatch on first character
+        let ch = peek_char().parse_next(input)?;
+
+        match ch {
+            '\'' => single_quoted_string().map(Cow::Owned).parse_next(input),
+            '"' => double_quoted_string().map(Cow::Owned).parse_next(input),
+            '$' => winnow::combinator::alt((
+                arithmetic_expansion(), // $(( before $(
+                command_substitution(), // $(
+                braced_variable(),      // ${ before $
+                special_parameter(),    // $1, $?, etc. before simple $VAR
+                simple_variable(),      // $VAR
+            ))
+            .map(Cow::Borrowed)
+            .parse_next(input),
+            '`' => backtick_substitution().map(Cow::Borrowed).parse_next(input),
+            '\\' => escape_sequence()
+                .map(|c| Cow::Owned(format!("\\{c}")))
+                .parse_next(input),
+            // Tilde after colon: ~user or ~ expansion
+            '~' if ctx.options.tilde_expansion_after_colon && last_char == Some(':') => {
+                if let Ok(tilde_expr) = tilde_expansion().parse_next(input) {
+                    Ok(Cow::Borrowed(tilde_expr))
+                } else {
+                    bare_word().map(Cow::Borrowed).parse_next(input)
+                }
+            }
+            // Extended glob patterns start with ?, *, +, @, or ! followed by (
+            '?' | '*' | '+' | '@' | '!' if ctx.options.enable_extended_globbing => {
+                if let Some(pattern) =
+                    winnow::combinator::opt(extglob_pattern()).parse_next(input)?
+                {
+                    Ok(Cow::Borrowed(pattern))
+                } else {
+                    bare_word().map(Cow::Borrowed).parse_next(input)
+                }
+            }
+            // Default: parse as bare word (most common case)
+            _ => bare_word().map(Cow::Borrowed).parse_next(input),
+        }
+    }
+}
+
+/// Parse a word (one or more word parts combined)
+/// Handles quoted strings, escapes, and bare text
+/// Corresponds to: tokenizer's word parsing + winnow.rs `word_as_ast()`
+pub fn word_as_ast<'a>(
+    ctx: &'a ParseContext<'a>,
+    tracker: &'a PositionTracker,
+) -> impl Parser<StrStream<'a>, ast::Word, PError> + 'a {
+    move |input: &mut StrStream<'a>| {
+        let start_offset = tracker.offset_from_locating(input);
+
+        // Check for tilde at word start if enabled
+        let mut value: Cow<'_, str> = Cow::Borrowed("");
+        let mut last_char = None;
+
+        if ctx.options.tilde_expansion_at_word_start {
+            if peek_char().parse_next(input).ok() == Some('~') {
+                if let Ok(tilde_expr) = tilde_expansion().parse_next(input) {
+                    last_char = tilde_expr.chars().last();
+                    value = Cow::Borrowed(tilde_expr);
+                }
+            }
+        }
+
+        // Parse remaining word parts, tracking last character for tilde-after-colon detection
+        while let Ok(part) = word_part(ctx, last_char).parse_next(input) {
+            // Update last_char efficiently - just get the last char of the new part
+            last_char = part.chars().last().or(last_char);
+
+            // Optimize: avoid allocation if this is the first and only part
+            if value.is_empty() {
+                value = part;
+            } else {
+                // Need to combine parts - must allocate
+                value.to_mut().push_str(&part);
+            }
+        }
+
+        // Must have at least one character
+        if value.is_empty() {
+            return Err(winnow::error::ErrMode::Backtrack(ContextError::default()));
+        }
+
+        let end_offset = tracker.offset_from_locating(input);
+        let loc = tracker.range_to_span(start_offset..end_offset);
+
+        Ok(ast::Word {
+            value: value.into_owned(),
+            loc: Some(loc),
+        })
+    }
+}
 
 /// Parse a wordlist (one or more words separated by spaces)
 /// Corresponds to: winnow.rs `wordlist()`
+pub fn wordlist<'a>(
+    ctx: &'a ParseContext<'a>,
+    tracker: &'a PositionTracker,
+) -> impl Parser<StrStream<'a>, Vec<ast::Word>, PError> + 'a {
+    move |input: &mut StrStream<'a>| {
+        winnow::combinator::separated(1.., word_as_ast(ctx, tracker), spaces1()).parse_next(input)
+    }
+}
 
 // ============================================================================
 // Tier 8: Redirections
