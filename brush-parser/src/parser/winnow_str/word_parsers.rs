@@ -1,5 +1,7 @@
 //! Variable expansion and basic word parsers
 
+use std::borrow::Cow;
+
 use winnow::error::ContextError;
 use winnow::prelude::*;
 use winnow::stream::{LocatingSlice, Offset};
@@ -176,4 +178,86 @@ pub fn escape_sequence<'a>() -> impl Parser<StrStream<'a>, char, PError> {
         '\\',
         winnow::token::any, // For now, just return the escaped character as-is
     )
+}
+
+/// Check if a string is a shell reserved word
+///
+/// Note: This list matches the PEG parser's reserved word list.
+/// "time" and "coproc" are bash reserved words but are NOT included here
+/// to match PEG parser behavior (which allows them as command names).
+pub fn is_reserved_word(s: &str) -> bool {
+    matches!(
+        s,
+        "if" | "then"
+            | "else"
+            | "elif"
+            | "fi"
+            | "do"
+            | "done"
+            | "while"
+            | "until"
+            | "for"
+            | "in"
+            | "case"
+            | "esac"
+            | "function"
+            | "{"
+            | "}"
+            | "!"
+            | "[["
+            | "]]"
+            | "select"
+    )
+}
+
+/// Parse a word part (bare text, single quote, double quote, escape, or expansion)
+/// Returns the string value of the part
+/// The `last_char` parameter helps detect tilde-after-colon
+pub fn word_part<'a>(
+    ctx: &'a super::context::ParseContext<'a>,
+    last_char: Option<char>,
+) -> impl Parser<StrStream<'a>, Cow<'a, str>, PError> + 'a {
+    move |input: &mut StrStream<'a>| {
+        // Fast path: dispatch on first character
+        let ch = super::char_parsers::peek_char().parse_next(input)?;
+
+        match ch {
+            '\'' => single_quoted_string().map(Cow::Owned).parse_next(input),
+            '"' => double_quoted_string().map(Cow::Owned).parse_next(input),
+            '$' => winnow::combinator::alt((
+                arithmetic_expansion(), // $(( before $(
+                command_substitution(), // $(
+                braced_variable(),      // ${ before $
+                special_parameter(),    // $1, $?, etc. before simple $VAR
+                simple_variable(),      // $VAR
+            ))
+            .map(Cow::Borrowed)
+            .parse_next(input),
+            '`' => backtick_substitution().map(Cow::Borrowed).parse_next(input),
+            '\\' => escape_sequence()
+                .map(|c| Cow::Owned(format!("\\{c}")))
+                .parse_next(input),
+            // Tilde after colon: ~user or ~ expansion
+            '~' if ctx.options.tilde_expansion_after_colon && last_char == Some(':') => {
+                if let Ok(tilde_expr) = super::char_parsers::tilde_expansion().parse_next(input) {
+                    Ok(Cow::Borrowed(tilde_expr))
+                } else {
+                    bare_word().map(Cow::Borrowed).parse_next(input)
+                }
+            }
+            // Extended glob patterns start with ?, *, +, @, or ! followed by (
+            '?' | '*' | '+' | '@' | '!' if ctx.options.enable_extended_globbing => {
+                if let Some(pattern) =
+                    winnow::combinator::opt(super::char_parsers::extglob_pattern())
+                        .parse_next(input)?
+                {
+                    Ok(Cow::Borrowed(pattern))
+                } else {
+                    bare_word().map(Cow::Borrowed).parse_next(input)
+                }
+            }
+            // Default: parse as bare word (most common case)
+            _ => bare_word().map(Cow::Borrowed).parse_next(input),
+        }
+    }
 }
