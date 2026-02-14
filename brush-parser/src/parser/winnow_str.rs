@@ -5,6 +5,10 @@
 
 #![allow(dead_code)]
 
+// Declare submodules (they will be empty for now)
+mod context;
+mod types;
+
 use std::borrow::Cow;
 
 use winnow::combinator::{dispatch, fail, peek, repeat};
