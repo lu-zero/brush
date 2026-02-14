@@ -2,7 +2,7 @@
 
 use winnow::error::ContextError;
 use winnow::prelude::*;
-use winnow::stream::LocatingSlice;
+use winnow::stream::{LocatingSlice, Offset};
 use winnow::token::take_while;
 
 /// Type alias for parser error
@@ -86,4 +86,94 @@ pub fn special_parameter<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
         )),
     )
         .take()
+}
+
+/// Parse a single-quoted string: 'text'
+/// In single quotes, everything is literal except the closing quote
+/// Returns the full string including quotes (e.g., "'text'")
+pub fn single_quoted_string<'a>() -> impl Parser<StrStream<'a>, String, PError> {
+    ('\'', take_while(0.., |c: char| c != '\''), '\'')
+        .take()
+        .map(|s: &str| s.to_string())
+}
+
+/// Parse a double-quoted string: "text".
+///
+/// Returns the full string including quotes (e.g., `"text"`).
+/// Handles backslash escape sequences and `$(...)` command substitutions
+/// (which may span multiple lines for heredocs) inside the string.
+pub fn double_quoted_string<'a>() -> impl Parser<StrStream<'a>, String, PError> {
+    move |input: &mut StrStream<'a>| {
+        let start = input.checkpoint();
+
+        // Match opening quote
+        '"'.parse_next(input)?;
+
+        loop {
+            // Try to match closing quote
+            if winnow::combinator::opt::<_, _, PError, _>('"')
+                .parse_next(input)?
+                .is_some()
+            {
+                break;
+            }
+
+            match winnow::token::any::<_, PError>.parse_next(input) {
+                Ok('\\') => {
+                    // Escape sequence: skip the next character
+                    let _ = winnow::token::any::<_, PError>.parse_next(input);
+                }
+                Ok('$') => {
+                    // Check if this starts a $(...) command substitution (not
+                    // $((...)) arithmetic). If so, we MUST consume it as a
+                    // balanced unit because the body can span multiple lines
+                    // (e.g., heredocs). If the closing `)` is missing, that's a
+                    // hard error — not optional.
+                    if winnow::combinator::peek::<_, _, PError, _>(winnow::combinator::not("(("))
+                        .parse_next(input)
+                        .is_ok()
+                        && winnow::combinator::peek::<_, _, PError, _>('(')
+                            .parse_next(input)
+                            .is_ok()
+                    {
+                        // Committed: $( was detected, must find closing )
+                        super::char_parsers::parse_balanced_delimiters("(", Some('('), ')', 1)
+                            .void()
+                            .parse_next(input)?;
+                    }
+                    // Otherwise $ was just a plain character — already consumed.
+                }
+                Ok('`') => {
+                    // Backtick substitution — consume until matching backtick
+                    let _: Result<&str, PError> =
+                        take_while(0.., |c: char| c != '`').parse_next(input);
+                    let _ = winnow::combinator::opt::<_, _, PError, _>('`').parse_next(input);
+                }
+                Ok(_) => {
+                    // Regular character — already consumed
+                }
+                Err(_) => {
+                    // Hit end of input without closing quote
+                    return Err(winnow::error::ErrMode::Backtrack(ContextError::default()));
+                }
+            }
+        }
+
+        // Get the full slice from start to current position
+        let end = input.checkpoint();
+        let consumed_len = end.offset_from(&start);
+        input.reset(&start);
+        let result: &str = winnow::token::take(consumed_len).parse_next(input)?;
+
+        Ok(result.to_string())
+    }
+}
+
+/// Parse an escape sequence: \c
+/// Returns the escaped character (simplified version)
+pub fn escape_sequence<'a>() -> impl Parser<StrStream<'a>, char, PError> {
+    winnow::combinator::preceded(
+        '\\',
+        winnow::token::any, // For now, just return the escaped character as-is
+    )
 }
