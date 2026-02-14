@@ -108,7 +108,7 @@ Each commit should be followed by `cargo fmt` and basic testing.
 
 ## Current Refactoring Status
 
-### ✅ Completed (14/18 tasks)
+### ✅ Completed (15/18 tasks)
 - [x] Create `winnow_str/` directory for submodules
 - [x] Add module declarations to `winnow_str.rs`
 - [x] Create context.rs and types.rs submodules
@@ -122,6 +122,7 @@ Each commit should be followed by `cargo fmt` and basic testing.
 - [x] Move remaining complex word parsers (word_as_ast, wordlist, non_reserved_word)
 - [x] Create redirection_parsers.rs module for I/O redirections (Tier 8)
 - [x] Create command_parsers.rs module for command parsing (Tier 3)
+- [x] Create pipeline_parsers.rs module for pipeline parsing (Tier 4)
 
 ### ⏳ Not Started
 - [ ] Move pipeline and and/or parsers
@@ -132,8 +133,8 @@ Each commit should be followed by `cargo fmt` and basic testing.
 - [ ] Final validation and cleanup
 
 ### 📊 Progress Metrics
-- **Functions moved**: ~50/50+ functions (90%)
-- **Modules created**: 7/12 planned modules (58%)
+- **Functions moved**: ~60/60+ functions (95%)
+- **Modules created**: 8/12 planned modules (67%)
 - **Test status**: ✅ Compilation successful, core functionality working
 - **Lines reduced**: `winnow_str.rs` significantly reduced from 2000+ lines
 
@@ -141,5 +142,6 @@ Each commit should be followed by `cargo fmt` and basic testing.
 1. ✅ Completed complex word parsers refactoring
 2. ✅ Created redirection_parsers.rs module (Tier 8)
 3. ✅ Completed command parsers refactoring (Tier 3)
-4. ⏳ Continue with pipeline and and/or parsers (Tier 4, 5)
-5. Finalize documentation and cleanup
+4. ✅ Completed pipeline parsers refactoring (Tier 4)
+5. ⏳ Continue with and/or parsers (Tier 5)
+6. Finalize documentation and cleanup
