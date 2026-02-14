@@ -10,6 +10,7 @@ mod char_parsers;
 mod context;
 mod line_parsers;
 mod types;
+mod word_parsers;
 
 use std::borrow::Cow;
 
@@ -30,6 +31,10 @@ pub use char_parsers::{
 pub use context::{ParseContext, PositionTracker};
 pub use line_parsers::{linebreak, newline_list, separator, separator_op, spaces as line_spaces};
 pub use types::{PError, StrStream};
+pub use word_parsers::{
+    arithmetic_expansion, backtick_substitution, braced_variable, command_substitution,
+    simple_variable, special_parameter,
+};
 
 // ============================================================================
 // Tier 2: Word parsing
@@ -106,57 +111,6 @@ fn non_reserved_word<'a>(
 
 /// Parse a simple variable reference: $VAR
 /// Returns the expansion text including the $
-pub fn simple_variable<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
-    (
-        '$',
-        winnow::token::take_while(1.., |c: char| c.is_alphanumeric() || c == '_'),
-    )
-        .take()
-}
-
-/// Parse a braced variable reference: ${VAR}
-/// Returns the expansion text including ${ }
-pub fn braced_variable<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
-    parse_balanced_delimiters("${", Some('{'), '}', 1)
-}
-
-/// Parse an arithmetic expansion: $((expr))
-/// Returns the expansion text including $(( ))
-pub fn arithmetic_expansion<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
-    parse_balanced_delimiters("$((", Some('('), ')', 2)
-}
-
-/// Parse a command substitution: $(cmd)
-/// Returns the expansion text including $( )
-pub fn command_substitution<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
-    // Need to be careful: $(( is arithmetic, $( is command substitution
-    winnow::combinator::preceded(
-        winnow::combinator::peek(winnow::combinator::not("$((")),
-        parse_balanced_delimiters("$(", Some('('), ')', 1),
-    )
-}
-
-/// Parse a backtick command substitution: `cmd`
-/// Returns the expansion text including backticks
-pub fn backtick_substitution<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
-    parse_balanced_delimiters("`", None, '`', 1)
-}
-
-/// Parse special parameter: $0, $1, $?, $@, etc.
-/// Returns the expansion text including the $
-pub fn special_parameter<'a>() -> impl Parser<StrStream<'a>, &'a str, PError> {
-    (
-        '$',
-        winnow::combinator::alt((
-            winnow::token::one_of(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']),
-            winnow::token::one_of(['?', '@', '*', '#', '$', '!', '-', '_']),
-        )),
-    )
-        .take()
-}
-
-// ============================================================================
-// Tier 7: Quoted Strings
 // ============================================================================
 
 /// Parse a single-quoted string: 'text'
