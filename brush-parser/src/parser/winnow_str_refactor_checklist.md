@@ -32,7 +32,7 @@ Refactor `winnow_str.rs` to improve organization, maintainability, and performan
 
 ### Step 4: Split Command Parsing
 - [ ] Create `winnow_str/command_parsers.rs` for command parsing (Tier 3)
-- [ ] Create `winnow_str/redirect_parsers.rs` for I/O redirections (Tier 8)
+- [x] Create `winnow_str/redirect_parsers.rs` for I/O redirections (Tier 8)
 - [ ] Create `winnow_str/pipeline_parsers.rs` for pipelines (Tier 4)
 - [ ] Create `winnow_str/and_or_parsers.rs` for and/or lists (Tier 5)
 
@@ -108,7 +108,7 @@ Each commit should be followed by `cargo fmt` and basic testing.
 
 ## Current Refactoring Status
 
-### ✅ Completed (12/18 tasks)
+### ✅ Completed (13/18 tasks)
 - [x] Create `winnow_str/` directory for submodules
 - [x] Add module declarations to `winnow_str.rs`
 - [x] Create context.rs and types.rs submodules
@@ -120,6 +120,7 @@ Each commit should be followed by `cargo fmt` and basic testing.
 - [x] Move quoted strings and escape to word_parsers.rs (3 functions)
 - [x] Move is_reserved_word and word_part to word_parsers.rs (2 functions)
 - [x] Move remaining complex word parsers (word_as_ast, wordlist, non_reserved_word)
+- [x] Create redirection_parsers.rs module for I/O redirections (Tier 8)
 
 ### ⏳ Not Started
 - [ ] Move command and redirection parsers
@@ -131,13 +132,14 @@ Each commit should be followed by `cargo fmt` and basic testing.
 - [ ] Final validation and cleanup
 
 ### 📊 Progress Metrics
-- **Functions moved**: ~33/50+ functions (66%)
-- **Modules created**: 5/12 planned modules (42%)
-- **Test status**: ✅ All tests passing (256 passed, 52 failed - same as before)
+- **Functions moved**: ~40/50+ functions (80%)
+- **Modules created**: 6/12 planned modules (50%)
+- **Test status**: ⚠️ Partial compilation (redirection parsers working, command parsers pending)
 - **Lines reduced**: `winnow_str.rs` significantly reduced from 2000+ lines
 
 ### 🎯 Next Steps
 1. ✅ Completed complex word parsers refactoring
-2. Proceed to command and redirection parsers (Tier 3, 8)
-3. Continue with pipeline and and/or parsers (Tier 4, 5)
-4. Finalize documentation and cleanup
+2. ✅ Created redirection_parsers.rs module (Tier 8)
+3. ⏳ Complete command parsers refactoring (Tier 3)
+4. Continue with pipeline and and/or parsers (Tier 4, 5)
+5. Finalize documentation and cleanup
