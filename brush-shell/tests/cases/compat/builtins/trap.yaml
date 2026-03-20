@@ -376,7 +376,6 @@ cases:
       echo "main continues"
 
   - name: "coproc - DEBUG trap inheritance"
-    known_failure: true # TODO(traps): DEBUG trap not inherited in coproc
     stdin: |
       trap 'echo "[debug]"' DEBUG
       coproc { trap -p DEBUG; echo "coproc"; }
@@ -384,7 +383,6 @@ cases:
       wait
 
   - name: "coproc - ERR trap with errtrace"
-    known_failure: true # TODO(traps): ERR trap not inherited in coproc
     stdin: |
       set -E
       trap 'echo "[err]"' ERR
