@@ -118,6 +118,8 @@ impl builtins::DeclarationCommand for DeclareCommand {
 }
 
 impl builtins::Command for DeclareCommand {
+    type State = ();
+    type SharedState = ();
     fn takes_plus_options() -> bool {
         true
     }
@@ -135,7 +137,10 @@ impl builtins::Command for DeclareCommand {
         };
 
         if matches!(verb, DeclareVerb::Local) && !context.shell.in_function() {
-            writeln!(context.stderr(), "can only be used in a function")?;
+            let mut stderr_output = Vec::new();
+            writeln!(stderr_output, "can only be used in a function")?;
+            context.stderr().write_all(&stderr_output)?;
+            context.stderr().flush()?;
             return Ok(ExecutionResult::general_error());
         }
 
@@ -143,31 +148,66 @@ impl builtins::Command for DeclareCommand {
             return error::unimp("declare -I");
         }
 
+        let mut output = Vec::new();
+        let mut stderr_output = Vec::new();
         let mut result = ExecutionResult::success();
+
         if !self.declarations.is_empty() {
             for declaration in &self.declarations {
                 if self.print && !matches!(verb, DeclareVerb::Readonly) {
-                    if !self.try_display_declaration(&context, declaration, verb)? {
+                    if !self.try_display_declaration(
+                        &context,
+                        declaration,
+                        verb,
+                        &mut output,
+                        &mut stderr_output,
+                    )? {
                         result = ExecutionResult::general_error();
                     }
                 } else {
-                    if !self.process_declaration(&mut context, declaration, verb)? {
+                    let ok = if self.make_associative_array.is_some()
+                        && Self::is_scalar_compound_assign(declaration)
+                    {
+                        self.lift_scalar_assoc_array(&mut context, declaration, verb)
+                            .await?
+                    } else if self.make_indexed_array.is_some()
+                        && Self::is_string_array_assignment(declaration)
+                    {
+                        self.lift_string_array_assignment(&mut context, declaration, verb)
+                            .await?
+                    } else {
+                        self.process_declaration(&mut context, declaration, verb)?
+                    };
+                    if !ok {
                         result = ExecutionResult::general_error();
                     }
                 }
             }
         } else {
-            // Display matching declarations from the variable environment.
             if !self.function_names_only && !self.function_names_or_defs_only {
-                self.display_matching_env_declarations(&context, verb)?;
+                self.display_matching_env_declarations(&context, verb, &mut output)?;
             }
 
-            // Do the same for functions.
             if !matches!(verb, DeclareVerb::Local | DeclareVerb::Readonly)
                 && (!self.print || self.function_names_only || self.function_names_or_defs_only)
             {
-                self.display_matching_functions(&context)?;
+                self.display_matching_functions(&context, &mut output)?;
             }
+        }
+
+        if !output.is_empty() {
+            if let Some(mut stdout) = context.stdout_async() {
+                stdout.write_all(&output).await?;
+                stdout.flush().await?;
+            } else {
+                context.stdout().write_all(&output)?;
+                context.stdout().flush()?;
+            }
+        }
+
+        if !stderr_output.is_empty() {
+            context.stderr().write_all(&stderr_output)?;
+            context.stderr().flush()?;
         }
 
         Ok(result)
@@ -180,11 +220,13 @@ impl DeclareCommand {
         context: &brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
         declaration: &brush_core::CommandArg,
         verb: DeclareVerb,
+        output: &mut Vec<u8>,
+        stderr_output: &mut Vec<u8>,
     ) -> Result<bool, brush_core::Error> {
         let name = match declaration {
             brush_core::CommandArg::String(s) => s,
             brush_core::CommandArg::Assignment(_) => {
-                writeln!(context.stderr(), "declare: {declaration}: not found")?;
+                writeln!(stderr_output, "declare: {declaration}: not found")?;
                 return Ok(false);
             }
         };
@@ -199,16 +241,15 @@ impl DeclareCommand {
             if let Some(func_registration) = context.shell.funcs().get(name) {
                 if self.function_names_only {
                     if self.print {
-                        writeln!(context.stdout(), "declare -f {name}")?;
+                        writeln!(output, "declare -f {name}")?;
                     } else {
-                        writeln!(context.stdout(), "{name}")?;
+                        writeln!(output, "{name}")?;
                     }
                 } else {
-                    writeln!(context.stdout(), "{}", func_registration.definition())?;
+                    writeln!(output, "{}", func_registration.definition())?;
                 }
                 Ok(true)
             } else {
-                // For some reason, bash does not print an error message in this case.
                 Ok(false)
             }
         } else if let Some(variable) = context.shell.env().get_using_policy(name, lookup) {
@@ -225,14 +266,14 @@ impl DeclareCommand {
             };
 
             writeln!(
-                context.stdout(),
+                output,
                 "declare -{cs} {name}{separator_str}{}",
                 resolved_value.format(variables::FormatStyle::DeclarePrint, context.shell)?
             )?;
 
             Ok(true)
         } else {
-            writeln!(context.stderr(), "declare: {name}: not found")?;
+            writeln!(stderr_output, "declare: {name}: not found")?;
             Ok(false)
         }
     }
@@ -249,22 +290,34 @@ impl DeclareCommand {
                 && !self.create_global);
 
         if self.function_names_or_defs_only || self.function_names_only {
-            return self.try_display_declaration(context, declaration, verb);
+            let mut output = Vec::new();
+            let mut stderr_output = Vec::new();
+            let result = self.try_display_declaration(
+                context,
+                declaration,
+                verb,
+                &mut output,
+                &mut stderr_output,
+            )?;
+            if !output.is_empty() {
+                let _ = context.stdout().write_all(&output);
+                let _ = context.stdout().flush();
+            }
+            if !stderr_output.is_empty() {
+                let _ = context.stderr().write_all(&stderr_output);
+                let _ = context.stderr().flush();
+            }
+            return Ok(result);
         }
 
-        // Extract the variable name and the initial value being assigned (if any).
         let (name, assigned_index, initial_value, name_is_array) =
             Self::declaration_to_name_and_value(declaration)?;
 
-        // Special-case: `local -`
         if name == "-" && matches!(verb, DeclareVerb::Local) {
-            // TODO(local): `local -` allows shadowing the current `set` options (i.e., $-), with
-            // subsequent updates getting discarded when the current local scope is popped.
             tracing::warn!("not yet implemented: local -");
             return Ok(true);
         }
 
-        // Make sure it's a valid name.
         if !env::valid_variable_name(name.as_str()) {
             writeln!(
                 context.stderr(),
@@ -279,6 +332,16 @@ impl DeclareCommand {
             EnvironmentLookup::OnlyInCurrentLocal
         } else {
             EnvironmentLookup::Anywhere
+        };
+
+        // When applying readonly, bash follows namerefs: `readonly ref` (where ref is a nameref)
+        // makes the TARGET variable readonly, not the nameref variable itself.
+        let applying_readonly =
+            matches!(verb, DeclareVerb::Readonly) || self.make_readonly.to_bool() == Some(true);
+        let name = if applying_readonly {
+            Self::resolve_nameref(context, name)
+        } else {
+            name
         };
 
         // Look up the variable.
@@ -339,6 +402,127 @@ impl DeclareCommand {
         Ok(true)
     }
 
+    fn resolve_nameref(
+        context: &brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
+        name: String,
+    ) -> String {
+        let nameref_target = if let Some((_, var)) = context.shell.env().get(name.as_str()) {
+            if var.is_treated_as_nameref() {
+                var.value()
+                    .try_get_cow_str(context.shell)
+                    .map(|s| s.into_owned())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        nameref_target.unwrap_or(name)
+    }
+
+    /// Returns true if this declaration is a `CommandArg::String` containing
+    /// an `=` with an array-like value starting with `(`.
+    fn is_string_array_assignment(declaration: &brush_core::CommandArg) -> bool {
+        if let brush_core::CommandArg::String(s) = declaration {
+            if let Some((_name, value)) = s.split_once('=') {
+                return value.starts_with('(');
+            }
+        }
+        false
+    }
+
+    /// Returns true if this declaration is an assignment with a scalar value
+    /// that looks like a compound array literal, i.e. starts with `(`.
+    /// This is the pattern produced by `declare -p` roundtrips:
+    ///   `declare -A arr="${(declare -p OTHER)#*=}"`
+    fn is_scalar_compound_assign(declaration: &brush_core::CommandArg) -> bool {
+        if let brush_core::CommandArg::Assignment(a) = declaration {
+            if let ast::AssignmentValue::Scalar(s) = &a.value {
+                return s.value.starts_with('(');
+            }
+        }
+        false
+    }
+
+    /// Handle `declare -A varname="([key]=val ...)"` by feeding the compound-assignment
+    /// string back through the shell parser.  `declare -p` output is designed to be
+    /// eval-able, so the value is already valid shell syntax; we just need to let the
+    /// parser see it unquoted.
+    ///
+    /// After the roundtrip creates the array, any extra attributes requested on the
+    /// original declaration (readonly, export, …) are applied via a second call to
+    /// `process_declaration` on the name alone.
+    async fn lift_scalar_assoc_array<SE: brush_core::ShellExtensions>(
+        &self,
+        context: &mut brush_core::ExecutionContext<'_, SE>,
+        declaration: &brush_core::CommandArg,
+        verb: DeclareVerb,
+    ) -> Result<bool, brush_core::Error> {
+        let (name, _, initial_value, _) = Self::declaration_to_name_and_value(declaration)?;
+        let Some(ShellValueLiteral::Scalar(s)) = initial_value else {
+            return self.process_declaration(context, declaration, verb);
+        };
+
+        // Reconstruct the declaration so the parser sees an unquoted compound assignment.
+        // Use `local` when the original verb was `local`, `declare -g` when global was
+        // requested, and plain `declare` otherwise (which is local inside a function).
+        let script = if matches!(verb, DeclareVerb::Local) {
+            format!("local -A {name}={s}")
+        } else if self.create_global {
+            format!("declare -gA {name}={s}")
+        } else {
+            format!("declare -A {name}={s}")
+        };
+
+        let source_info = brush_core::SourceInfo::from("declare-array-literal");
+        let params = context.params.clone();
+        context
+            .shell
+            .run_string(script, &source_info, &params)
+            .await?;
+
+        // Apply any further attributes (readonly, export, etc.) that were on the original
+        // declaration by re-processing just the variable name (no initial value).
+        let name_only = brush_core::CommandArg::String(name);
+        self.process_declaration(context, &name_only, verb)
+    }
+
+    /// Handle `declare -a 'arr=(${X})'` by feeding the string back through the
+    /// shell parser so the array literal and parameter expansions are evaluated
+    /// properly.  This mirrors the approach used by `lift_scalar_assoc_array`.
+    async fn lift_string_array_assignment<SE: brush_core::ShellExtensions>(
+        &self,
+        context: &mut brush_core::ExecutionContext<'_, SE>,
+        declaration: &brush_core::CommandArg,
+        verb: DeclareVerb,
+    ) -> Result<bool, brush_core::Error> {
+        let brush_core::CommandArg::String(s) = declaration else {
+            return self.process_declaration(context, declaration, verb);
+        };
+
+        let Some((var_name, value)) = s.split_once('=') else {
+            return self.process_declaration(context, declaration, verb);
+        };
+
+        let script = if matches!(verb, DeclareVerb::Local) {
+            format!("local -a {var_name}={value}")
+        } else if self.create_global {
+            format!("declare -ga {var_name}={value}")
+        } else {
+            format!("declare -a {var_name}={value}")
+        };
+
+        let source_info = brush_core::SourceInfo::from("declare-string-array");
+        let params = context.params.clone();
+        context
+            .shell
+            .run_string(script, &source_info, &params)
+            .await?;
+
+        let name_only = brush_core::CommandArg::String(var_name.to_owned());
+        self.process_declaration(context, &name_only, verb)
+    }
+
     fn declaration_to_name_and_value(
         declaration: &brush_core::CommandArg,
     ) -> Result<(String, Option<String>, Option<ShellValueLiteral>, bool), brush_core::Error> {
@@ -349,18 +533,15 @@ impl DeclareCommand {
 
         match declaration {
             brush_core::CommandArg::String(s) => {
-                // We need to handle the case of someone invoking `declare array[index]`.
-                // In such case, we ignore the index and treat it as a declaration of
-                // the array.
                 #[allow(
                     clippy::unwrap_in_result,
                     clippy::unwrap_used,
                     reason = "regex is valid and should not fail"
                 )]
-                static ARRAY_AND_INDEX_RE: LazyLock<fancy_regex::Regex> =
-                    LazyLock::new(|| fancy_regex::Regex::new(r"^(.*?)\[(.*?)\]$").unwrap());
+                static NAME_INDEX_AND_VALUE_RE: LazyLock<fancy_regex::Regex> =
+                    LazyLock::new(|| fancy_regex::Regex::new(r"^(.*?)\[(.*?)?\]=(.*)$").unwrap());
 
-                if let Some(captures) = ARRAY_AND_INDEX_RE.captures(s)? {
+                if let Some(captures) = NAME_INDEX_AND_VALUE_RE.captures(s)? {
                     name = captures
                         .get(1)
                         .ok_or_else(|| {
@@ -370,13 +551,44 @@ impl DeclareCommand {
                         .to_owned();
 
                     assigned_index = captures.get(2).map(|m| m.as_str().to_owned());
+                    initial_value = captures
+                        .get(3)
+                        .map(|m| ShellValueLiteral::Scalar(m.as_str().to_owned()));
                     name_is_array = true;
-                } else {
-                    name = s.clone();
+                } else if let Some((n, v)) = s.split_once('=') {
+                    name = n.to_owned();
                     assigned_index = None;
+                    initial_value = Some(ShellValueLiteral::Scalar(v.to_owned()));
                     name_is_array = false;
+                } else {
+                    #[allow(
+                        clippy::unwrap_in_result,
+                        clippy::unwrap_used,
+                        reason = "regex is valid and should not fail"
+                    )]
+                    static ARRAY_AND_INDEX_RE: LazyLock<fancy_regex::Regex> =
+                        LazyLock::new(|| fancy_regex::Regex::new(r"^(.*?)\[(.*?)\]$").unwrap());
+
+                    if let Some(captures) = ARRAY_AND_INDEX_RE.captures(s)? {
+                        name = captures
+                            .get(1)
+                            .ok_or_else(|| {
+                                brush_core::ErrorKind::InternalError(
+                                    "declaration parse error".into(),
+                                )
+                            })?
+                            .as_str()
+                            .to_owned();
+
+                        assigned_index = captures.get(2).map(|m| m.as_str().to_owned());
+                        name_is_array = true;
+                    } else {
+                        name = s.clone();
+                        assigned_index = None;
+                        name_is_array = false;
+                    }
+                    initial_value = None;
                 }
-                initial_value = None;
             }
             brush_core::CommandArg::Assignment(assignment) => {
                 match &assignment.name {
@@ -428,22 +640,16 @@ impl DeclareCommand {
         &self,
         context: &brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
         verb: DeclareVerb,
+        output: &mut Vec<u8>,
     ) -> Result<(), brush_core::Error> {
-        //
-        // Dump all declarations. Use attribute flags to filter which variables are dumped.
-        //
-
-        // We start by excluding all variables that are not enumerable.
         #[expect(clippy::type_complexity)]
         let mut filters: Vec<Box<dyn Fn((&String, &ShellVariable)) -> bool>> =
             vec![Box::new(|(_, v)| v.is_enumerable())];
 
-        // Add filters depending on verb.
         if matches!(verb, DeclareVerb::Readonly) {
             filters.push(Box::new(|(_, v)| v.is_readonly()));
         }
 
-        // Add filters depending on attribute flags.
         if let Some(value) = self.make_indexed_array.to_bool() {
             filters.push(Box::new(move |(_, v)| {
                 matches!(v.value(), ShellValue::IndexedArray(_)) == value
@@ -500,8 +706,6 @@ impl DeclareCommand {
             EnvironmentLookup::Anywhere
         };
 
-        // Iterate through an ordered list of all matching declarations tracked in the
-        // environment.
         for (name, variable) in context
             .shell
             .env()
@@ -522,7 +726,7 @@ impl DeclareCommand {
                 };
 
                 writeln!(
-                    context.stdout(),
+                    output,
                     "declare -{cs} {name}{separator_str}{}",
                     variable
                         .value()
@@ -530,7 +734,7 @@ impl DeclareCommand {
                 )?;
             } else {
                 writeln!(
-                    context.stdout(),
+                    output,
                     "{name}={}",
                     variable
                         .value()
@@ -545,12 +749,13 @@ impl DeclareCommand {
     fn display_matching_functions(
         &self,
         context: &brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
+        output: &mut Vec<u8>,
     ) -> Result<(), brush_core::Error> {
         for (name, registration) in context.shell.funcs().iter().sorted_by_key(|v| v.0) {
             if self.function_names_only {
-                writeln!(context.stdout(), "declare -f {name}")?;
+                writeln!(output, "declare -f {name}")?;
             } else {
-                writeln!(context.stdout(), "{}", registration.definition())?;
+                writeln!(output, "{}", registration.definition())?;
             }
         }
 
