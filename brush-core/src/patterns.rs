@@ -999,6 +999,33 @@ mod tests {
         Ok(())
     }
 
+    /// Regression test: a wildcard followed by literal path components must
+    /// only yield paths whose *full* path exists on disk. Previously the
+    /// literal tail (`lib/foo.a`) was appended blindly to every directory the
+    /// wildcard matched, so `*/lib/foo.a` produced non-existent paths like
+    /// `b/lib/foo.a` (this broke e.g. nss's `cp -L */lib/*.a` and
+    /// `pushd dist/*/bin`).
+    #[test]
+    fn test_wildcard_with_literal_tail_filters_nonexistent() -> Result<()> {
+        let scratch = tempfile::tempdir()?;
+        // a/lib/foo.a exists; b exists but has no lib/foo.a; c/lib exists but
+        // has no foo.a.
+        std::fs::create_dir_all(scratch.path().join("a/lib"))?;
+        std::fs::create_dir_all(scratch.path().join("b"))?;
+        std::fs::create_dir_all(scratch.path().join("c/lib"))?;
+        std::fs::write(scratch.path().join("a/lib/foo.a"), "")?;
+
+        let pattern = Pattern::from("*/lib/foo.a").set_extended_globbing(false);
+        let result = pattern.expand::<fn(&Path) -> bool>(
+            scratch.path(),
+            None,
+            &FilenameExpansionOptions::default(),
+        )?;
+
+        assert_eq!(expect_expanded(result)?, vec!["a/lib/foo.a".to_string()]);
+        Ok(())
+    }
+
     /// Verifies absolute-pattern expansion still works after the prefix
     /// handling changes.
     #[test]
