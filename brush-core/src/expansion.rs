@@ -2082,6 +2082,10 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
                     v.value(),
                     ShellValue::AssociativeArray(_)
                         | ShellValue::Unset(ShellValueUnsetType::AssociativeArray)
+                        | ShellValue::Dynamic {
+                            kind: variables::DynamicValueKind::AssociativeArray,
+                            ..
+                        }
                 )
             });
         let index_to_use = self.expand_array_index(index, is_assoc).await?;
