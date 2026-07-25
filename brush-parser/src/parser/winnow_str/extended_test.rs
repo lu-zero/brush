@@ -560,20 +560,29 @@ fn ext_test_regex_word<'a>(
     }
 }
 
-/// Parse primary extended test expression (parentheses, binary/unary tests, or word)
+/// Parse primary extended test expression (parentheses, binary/unary tests, or word).
+///
+/// Returns whether a newline may follow the parsed term before the next
+/// separator (`]]`, `)`, `&&`, or `||`). This mirrors the peg grammar, which
+/// places `linebreak()` after every primary form *except* a bare-word string
+/// test -- `[[ x \n ]]` is a syntax error in bash, but `[[ -n x \n ]]` is not.
 fn ext_test_primary<'a>(
     tracker: &'a PositionTracker,
-) -> impl ModalParser<StrStream<'a>, ast::ExtendedTestExpr, ContextError> + 'a {
+) -> impl ModalParser<StrStream<'a>, (ast::ExtendedTestExpr, bool), ContextError> + 'a {
     move |input: &mut StrStream<'a>| {
         ext_test_spaces().parse_next(input)?;
 
         // Try parenthesized expression
         if winnow::combinator::opt('(').parse_next(input)?.is_some() {
             ext_test_spaces().parse_next(input)?;
-            let expr = ext_test_or_expr(tracker).parse_next(input)?;
-            ext_test_spaces().parse_next(input)?;
+            let (expr, inner_trailing_ok) = ext_test_or_expr(tracker).parse_next(input)?;
+            if inner_trailing_ok {
+                ext_test_spaces().parse_next(input)?;
+            } else {
+                spaces().parse_next(input)?;
+            }
             ')'.parse_next(input)?;
-            return Ok(ast::ExtendedTestExpr::Parenthesized(Box::new(expr)));
+            return Ok((ast::ExtendedTestExpr::Parenthesized(Box::new(expr)), true));
         }
 
         // Try unary test (operator + operand)
@@ -582,17 +591,21 @@ fn ext_test_primary<'a>(
             if let Some(unary_pred) = parse_unary_operator(&op_word.value) {
                 ext_test_spaces().parse_next(input)?;
                 let operand = ext_test_word(tracker).parse_next(input)?;
-                return Ok(ast::ExtendedTestExpr::UnaryTest(unary_pred, operand));
+                return Ok((ast::ExtendedTestExpr::UnaryTest(unary_pred, operand), true));
             }
         }
         input.reset(&checkpoint);
 
         // Try binary test (operand + operator + operand)
         let left_word = ext_test_word(tracker).parse_next(input)?;
+        // Checkpoint before consuming inter-token whitespace: if this doesn't
+        // turn out to be a binary operator, we fall back to treating
+        // `left_word` as a bare-word test, which must not have swallowed any
+        // newline that belongs to the trailing separator check instead.
+        let checkpoint2 = input.checkpoint();
         ext_test_spaces().parse_next(input)?;
 
         // Check for binary operator
-        let checkpoint2 = input.checkpoint();
         if let Ok(op_word) = ext_test_word(tracker).parse_next(input) {
             if let Some(mut binary_pred) = parse_binary_operator(&op_word.value) {
                 let is_regex_op = matches!(binary_pred, ast::BinaryPredicate::StringMatchesRegex);
@@ -618,19 +631,22 @@ fn ext_test_primary<'a>(
                     binary_pred = ast::BinaryPredicate::StringContainsSubstring;
                 }
 
-                return Ok(ast::ExtendedTestExpr::BinaryTest(
-                    binary_pred,
-                    left_word,
-                    right_word,
+                return Ok((
+                    ast::ExtendedTestExpr::BinaryTest(binary_pred, left_word, right_word),
+                    true,
                 ));
             }
         }
         input.reset(&checkpoint2);
 
-        // Fallback: single word tests for non-zero length
-        Ok(ast::ExtendedTestExpr::UnaryTest(
-            ast::UnaryPredicate::StringHasNonZeroLength,
-            left_word,
+        // Fallback: single word tests for non-zero length. No trailing
+        // newline is allowed here (see the function doc comment above).
+        Ok((
+            ast::ExtendedTestExpr::UnaryTest(
+                ast::UnaryPredicate::StringHasNonZeroLength,
+                left_word,
+            ),
+            false,
         ))
     }
 }
@@ -638,7 +654,7 @@ fn ext_test_primary<'a>(
 /// Parse NOT expression (right-associative)
 fn ext_test_not_expr<'a>(
     tracker: &'a PositionTracker,
-) -> impl ModalParser<StrStream<'a>, ast::ExtendedTestExpr, ContextError> + 'a {
+) -> impl ModalParser<StrStream<'a>, (ast::ExtendedTestExpr, bool), ContextError> + 'a {
     move |input: &mut StrStream<'a>| {
         ext_test_spaces().parse_next(input)?;
 
@@ -651,9 +667,10 @@ fn ext_test_not_expr<'a>(
                 return ext_test_primary(tracker).parse_next(input);
             }
 
-            // Parse NOT recursively (right-associative)
-            let expr = ext_test_not_expr(tracker).parse_next(input)?;
-            return Ok(ast::ExtendedTestExpr::Not(Box::new(expr)));
+            // Parse NOT recursively (right-associative). The trailing-newline
+            // eligibility is inherited from the wrapped expression.
+            let (expr, trailing_ok) = ext_test_not_expr(tracker).parse_next(input)?;
+            return Ok((ast::ExtendedTestExpr::Not(Box::new(expr)), trailing_ok));
         }
 
         ext_test_primary(tracker).parse_next(input)
@@ -663,50 +680,64 @@ fn ext_test_not_expr<'a>(
 /// Parse AND expression (left-associative)
 fn ext_test_and_expr<'a>(
     tracker: &'a PositionTracker,
-) -> impl ModalParser<StrStream<'a>, ast::ExtendedTestExpr, ContextError> + 'a {
+) -> impl ModalParser<StrStream<'a>, (ast::ExtendedTestExpr, bool), ContextError> + 'a {
     move |input: &mut StrStream<'a>| {
-        let mut left = ext_test_not_expr(tracker).parse_next(input)?;
+        let (mut left, mut trailing_ok) = ext_test_not_expr(tracker).parse_next(input)?;
 
         loop {
-            ext_test_spaces().parse_next(input)?;
+            // A newline may only precede `&&` if the left operand just parsed
+            // ended in a complete term, not a bare-word string test.
+            if trailing_ok {
+                ext_test_spaces().parse_next(input)?;
+            } else {
+                spaces().parse_next(input)?;
+            }
             let checkpoint = input.checkpoint();
 
             // Check for && operator
             if winnow::combinator::opt("&&").parse_next(input)?.is_some() {
-                let right = ext_test_not_expr(tracker).parse_next(input)?;
+                let (right, right_trailing_ok) = ext_test_not_expr(tracker).parse_next(input)?;
                 left = ast::ExtendedTestExpr::And(Box::new(left), Box::new(right));
+                trailing_ok = right_trailing_ok;
             } else {
                 input.reset(&checkpoint);
                 break;
             }
         }
 
-        Ok(left)
+        Ok((left, trailing_ok))
     }
 }
 
 /// Parse OR expression (left-associative, lowest precedence)
 fn ext_test_or_expr<'a>(
     tracker: &'a PositionTracker,
-) -> impl ModalParser<StrStream<'a>, ast::ExtendedTestExpr, ContextError> + 'a {
+) -> impl ModalParser<StrStream<'a>, (ast::ExtendedTestExpr, bool), ContextError> + 'a {
     move |input: &mut StrStream<'a>| {
-        let mut left = ext_test_and_expr(tracker).parse_next(input)?;
+        let (mut left, mut trailing_ok) = ext_test_and_expr(tracker).parse_next(input)?;
 
         loop {
-            ext_test_spaces().parse_next(input)?;
+            // A newline may only precede `||` if the left operand just parsed
+            // ended in a complete term, not a bare-word string test.
+            if trailing_ok {
+                ext_test_spaces().parse_next(input)?;
+            } else {
+                spaces().parse_next(input)?;
+            }
             let checkpoint = input.checkpoint();
 
             // Check for || operator
             if winnow::combinator::opt("||").parse_next(input)?.is_some() {
-                let right = ext_test_and_expr(tracker).parse_next(input)?;
+                let (right, right_trailing_ok) = ext_test_and_expr(tracker).parse_next(input)?;
                 left = ast::ExtendedTestExpr::Or(Box::new(left), Box::new(right));
+                trailing_ok = right_trailing_ok;
             } else {
                 input.reset(&checkpoint);
                 break;
             }
         }
 
-        Ok(left)
+        Ok((left, trailing_ok))
     }
 }
 
@@ -726,10 +757,16 @@ pub(super) fn extended_test_command<'a>(
         // Once we've seen [[, we're committed - any error should not backtrack
         // This ensures parse errors are reported at the actual error location, not "end of input"
         ext_test_spaces().parse_next(input)?;
-        let expr = ext_test_or_expr(tracker)
+        let (expr, trailing_ok) = ext_test_or_expr(tracker)
             .parse_next(input)
             .map_err(|e| e.cut())?;
-        ext_test_spaces().parse_next(input).map_err(|e| e.cut())?;
+        // A newline may only precede `]]` if the expression just parsed ended
+        // in a complete term, not a bare-word string test.
+        if trailing_ok {
+            ext_test_spaces().parse_next(input).map_err(|e| e.cut())?;
+        } else {
+            spaces().parse_next(input).map_err(|e| e.cut())?;
+        }
         ']'.parse_next(input)
             .map_err(|e: winnow::error::ErrMode<ContextError>| e.cut())?;
         ']'.parse_next(input)
