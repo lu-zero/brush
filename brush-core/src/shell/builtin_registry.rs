@@ -98,8 +98,8 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
     ///
     /// # Panics
     ///
-    /// Methods on the returned handle panic if shared state for `T` has not
-    /// been seeded (i.e. [`register_shared`](Self::register_shared) or
+    /// Methods on the returned handle return an error if shared state for `T`
+    /// has not been seeded (i.e. [`register_shared`](Self::register_shared) or
     /// [`set_shared`](Self::set_shared) has not been called for `T`).
     #[allow(clippy::missing_const_for_fn)]
     pub fn shared_handle<T>(&mut self) -> builtins::SharedHandle<'_, T, SE>

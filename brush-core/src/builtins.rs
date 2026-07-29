@@ -403,6 +403,24 @@ impl<SE: extensions::ShellExtensions, S, L> Registration<SE, S, L> {
         };
         (stored, local_override, state_init)
     }
+
+    /// Erase the local-state phantom to [`HasLocalState`], preserving the
+    /// shared-state phantom `S`. Used by [`SharedBuilder`] and
+    /// [`SharedHandle`], which accept registrations in any local-state
+    /// typestate and store them in a uniform form.
+    pub(crate) fn normalize_local(self) -> Registration<SE, S, HasLocalState> {
+        Registration {
+            execute_func: self.execute_func,
+            content_func: self.content_func,
+            disabled: self.disabled,
+            special_builtin: self.special_builtin,
+            declaration_builtin: self.declaration_builtin,
+            state_init: self.state_init,
+            local_override: self.local_override,
+            _shared: PhantomData,
+            _local: PhantomData,
+        }
+    }
 }
 
 impl<SE: extensions::ShellExtensions, S, St: Clone + Send + Sync + 'static>
@@ -891,7 +909,7 @@ pub struct SharedBuilder<T, SE: extensions::ShellExtensions = extensions::Defaul
     /// The shared state value to be seeded into `Shell::shared_states`.
     pub(crate) value: T,
     /// Builtins to register alongside the shared state.
-    pub(crate) builtins: Vec<(String, Registration<SE, T>)>,
+    pub(crate) builtins: Vec<(String, Registration<SE, T, HasLocalState>)>,
 }
 
 impl<T: Clone + Send + Sync + 'static, SE: extensions::ShellExtensions> SharedBuilder<T, SE> {
@@ -906,9 +924,11 @@ impl<T: Clone + Send + Sync + 'static, SE: extensions::ShellExtensions> SharedBu
     /// Add a builtin that shares state type `T`.
     ///
     /// Compile error if the registration's shared-state phantom is not `T`.
+    /// The registration may be in any local-state typestate (e.g. as produced
+    /// by [`builtin`] before calling [`with_state`](Registration::with_state)).
     #[must_use]
-    pub fn builtin(mut self, name: impl Into<String>, reg: Registration<SE, T>) -> Self {
-        self.builtins.push((name.into(), reg));
+    pub fn builtin<L>(mut self, name: impl Into<String>, reg: Registration<SE, T, L>) -> Self {
+        self.builtins.push((name.into(), reg.normalize_local()));
         self
     }
 }
@@ -926,17 +946,25 @@ pub struct SharedHandle<'a, T, SE: extensions::ShellExtensions> {
 impl<T: Clone + Send + Sync + 'static, SE: extensions::ShellExtensions> SharedHandle<'_, T, SE> {
     /// Register a builtin against the existing shared state of type `T`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the shared state has not been seeded (i.e. if
+    /// Returns [`ErrorKind::SharedStateNotRegistered`](crate::error::ErrorKind::SharedStateNotRegistered)
+    /// if the shared state has not been seeded (i.e. if
     /// [`register_shared`](crate::Shell::register_shared) or
     /// [`set_shared`](crate::Shell::set_shared) has not been called for `T`).
-    pub fn builtin(&mut self, name: impl Into<String>, reg: Registration<SE, T>) {
-        assert!(
-            self.shell.shared_states().contains_key(&TypeId::of::<T>()),
-            "SharedHandle::builtin called but shared state for {} has not been seeded",
-            type_name::<T>(),
-        );
+    ///
+    /// The registration may be in any local-state typestate (e.g. as produced
+    /// by [`builtin`] before calling [`with_state`](Registration::with_state)).
+    pub fn builtin<L>(
+        &mut self,
+        name: impl Into<String>,
+        reg: Registration<SE, T, L>,
+    ) -> Result<(), error::Error> {
+        if !self.shell.shared_states().contains_key(&TypeId::of::<T>()) {
+            return Err(error::Error::from(
+                error::ErrorKind::SharedStateNotRegistered(type_name::<T>().to_string()),
+            ));
+        }
         let key = name.into();
         let (stored, local_override, state_init) = reg.into_parts();
         self.shell.builtins.insert(key.clone(), stored);
@@ -951,6 +979,7 @@ impl<T: Clone + Send + Sync + 'static, SE: extensions::ShellExtensions> SharedHa
                     .or_insert_with(state_init);
             }
         }
+        Ok(())
     }
 }
 
