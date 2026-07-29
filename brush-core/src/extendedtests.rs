@@ -50,11 +50,15 @@ pub(crate) async fn eval_extended_test_expr(
 /// the operand must end with `]`; the subscript is everything between the first
 /// `[` and the final `]` (already expanded by the time the test sees it).
 fn split_subscript(operand: &str) -> Option<(&str, &str)> {
-    let open = operand.find('[')?;
-    if open == 0 || !operand.ends_with(']') {
+    let (name, rest) = operand.split_once('[')?;
+    if name.is_empty() {
         return None;
     }
-    Some((&operand[..open], &operand[open + 1..operand.len() - 1]))
+    let (subscript, after) = rest.rsplit_once(']')?;
+    if !after.is_empty() {
+        return None;
+    }
+    Some((name, subscript))
 }
 
 async fn apply_unary_predicate(
