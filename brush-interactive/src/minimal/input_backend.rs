@@ -15,26 +15,10 @@ impl InputBackend for MinimalInputBackend {
         shell_ref: &crate::ShellRef<impl brush_core::ShellExtensions>,
         prompt: InteractivePrompt,
     ) -> Result<ReadResult, ShellError> {
-        // On wasm32 there is no multi-thread runtime, so fall back to single-line reads
-        // and skip the completeness check (which would need to lock the shell).
-        #[cfg(target_arch = "wasm32")]
-        {
-            return self.read_line_single(shell_ref, &prompt);
-        }
+        let stdin = std::io::stdin();
+        let prompt = stdin.is_terminal().then_some(&prompt);
 
-        // On other platforms, accumulate lines until they form a complete program.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let stdin = std::io::stdin();
-            let prompt = stdin.is_terminal().then_some(&prompt);
-
-            Self::read_program_from(
-                shell_ref,
-                prompt,
-                &mut stdin.lock(),
-                &mut std::io::stderr(),
-            )
-        }
+        Self::read_program_from(shell_ref, prompt, &mut stdin.lock(), &mut std::io::stderr())
     }
 }
 
@@ -49,7 +33,6 @@ impl MinimalInputBackend {
     /// * `prompt` - The prompt to display, or `None` to display nothing.
     /// * `reader` - The source to read lines from.
     /// * `writer` - Where prompts are written.
-    #[cfg(not(target_arch = "wasm32"))]
     fn read_program_from<R: BufRead, W: Write>(
         shell_ref: &crate::ShellRef<impl brush_core::ShellExtensions>,
         prompt: Option<&InteractivePrompt>,
@@ -91,7 +74,6 @@ impl MinimalInputBackend {
     }
 
     /// Reads a single line, returning `None` at end of input.
-    #[cfg(not(target_arch = "wasm32"))]
     fn read_input_line<R: BufRead>(reader: &mut R) -> Result<Option<String>, ShellError> {
         let mut input = String::new();
         let bytes_read = reader
@@ -100,37 +82,9 @@ impl MinimalInputBackend {
 
         Ok((bytes_read > 0).then_some(input))
     }
-
-    // --- wasm32 single-line fallback ---
-    // There is no multi-thread runtime on wasm32, so we read one line at a time and
-    // hand it straight to the shell without an accumulation/completeness loop.
-
-    #[cfg(target_arch = "wasm32")]
-    #[expect(clippy::unused_self)]
-    fn read_line_single(
-        &self,
-        _shell_ref: &crate::ShellRef<impl brush_core::ShellExtensions>,
-        prompt: &InteractivePrompt,
-    ) -> Result<ReadResult, ShellError> {
-        if std::io::stdin().is_terminal() {
-            eprint!("{}", prompt.prompt);
-            std::io::stderr().flush()?;
-        }
-
-        let mut input = String::new();
-        let bytes_read = std::io::stdin()
-            .read_line(&mut input)
-            .map_err(ShellError::InputError)?;
-
-        if bytes_read == 0 {
-            Ok(ReadResult::Eof)
-        } else {
-            Ok(ReadResult::Input(input))
-        }
-    }
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::{io::Cursor, sync::Arc};
