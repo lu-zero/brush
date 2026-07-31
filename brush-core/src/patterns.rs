@@ -434,11 +434,15 @@ impl Pattern {
     }
 }
 
-/// Checks whether a string contains glob metacharacters that would trigger
-/// pathname expansion. Delegates to the pattern parser's grammar, which is
-/// the single source of truth for what constitutes a glob metacharacter.
+/// Checks per `/`-component, not the whole string: a `[`/`]` pair split
+/// across a `/` (e.g. `foo[a/b]`) is never a real bracket expression, since
+/// pathname expansion splits on `/` before matching. Matches real bash;
+/// extglob groups spanning a `/` are a known, pre-existing exception (not
+/// introduced here — `expand`'s own split below has the same gap).
 fn requires_expansion(s: &str, enable_extended_globbing: bool) -> bool {
-    brush_parser::pattern::pattern_has_glob_metacharacters(s, enable_extended_globbing)
+    sys::fs::split_path_for_pattern(s).any(|component| {
+        brush_parser::pattern::pattern_has_glob_metacharacters(component, enable_extended_globbing)
+    })
 }
 
 fn pattern_to_regex_str(
@@ -939,6 +943,17 @@ mod tests {
         assert!(!requires_expansion("hello", false));
         assert!(!requires_expansion("@(a)", false));
         assert!(requires_expansion("@(a)", true));
+
+        // A `/` between `[` and `]` breaks the bracket (gentoo GURU mopidy's
+        // EPYTEST_DESELECT case). `[+-/]` is a *valid* range bash still
+        // refuses to glob, so it's the real discriminator, not just any
+        // string containing a slash.
+        assert!(!requires_expansion("[+-/]", false));
+        assert!(!requires_expansion(
+            "test_path_to_uri[test.mp3-file-file:///test.mp3]",
+            false
+        ));
+        assert!(requires_expansion("a[b/c]*", false));
     }
 
     /// Extracts the `Expanded` payload from a `PatternExpansionResult`,
