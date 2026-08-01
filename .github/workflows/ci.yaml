@@ -303,7 +303,7 @@ jobs:
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: stable
-          targets: ${{ matrix.extra_rust_targets || '' }}
+          targets: ${{ matrix.host_config.extra_rust_targets || '' }}
           components: llvm-tools-preview
 
       - name: Enable cargo cache
@@ -319,16 +319,16 @@ jobs:
           tool: cargo-nextest
 
       - name: Install cargo-llvm-cov
-        if: ${{ matrix.coverage }}
+        if: ${{ matrix.host_config.coverage }}
         uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
           tool: cargo-llvm-cov
 
       - name: Install WASI runtime
-        if: ${{ matrix.wasi_runtime }}
+        if: ${{ matrix.host_config.wasi_runtime }}
         uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
-          tool: ${{ matrix.wasi_runtime }}
+          tool: ${{ matrix.host_config.wasi_runtime }}
 
       - name: Set up Homebrew
         if: ${{ matrix.host_config.homebrew_supported }}
@@ -407,7 +407,7 @@ jobs:
 
       - name: "Generate code coverage report"
         uses: clearlyip/code-coverage-report-action@110af9d4ec87b6706f182fd90e3102af9e5203bf # v7.0.0
-        if: ${{ always() && matrix.coverage }}
+        if: ${{ always() && matrix.host_config.coverage }}
         id: "code_coverage_report"
         with:
           artifact_download_workflow_names: "CI"

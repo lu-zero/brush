@@ -955,12 +955,19 @@ pub(super) fn is_reserved_word(s: &str) -> bool {
 // sites in `program.rs` where comments are meaningful (between or trailing
 // a complete command).  Inner call sites (inside `keyword`, `name`, etc.)
 // continue using the zero-cost originals.
+//
+// Side-effect rule: never push into `ctx.comments` until the surrounding
+// production has fully succeeded.  `comment_tracking` used to record the
+// span as soon as `#...` matched; when it sat inside
+// `(spaces, opt(comment), newline)` and `newline` then failed, winnow
+// rewound the input but left the push in place — so a trailing
+// no-newline comment was recorded three times (once per speculative
+// attempt).  `comment_span` is the pure (no side-effect) building block;
+// callers push only after the full match.
 // ============================================================================
 
-/// Parse a comment and record its byte range in `ctx.comments`.
-pub(super) fn comment_tracking<'a>(
-    ctx: &'a super::types::ParseContext<'a>,
-) -> impl ModalParser<StrStream<'a>, (), ContextError> + 'a {
+/// Parse a comment and return its byte range, without recording it.
+fn comment_span<'a>() -> impl ModalParser<StrStream<'a>, std::ops::Range<usize>, ContextError> {
     use winnow::stream::Location;
     move |input: &mut StrStream<'a>| {
         let start = input.current_token_start();
@@ -968,7 +975,21 @@ pub(super) fn comment_tracking<'a>(
             .void()
             .parse_next(input)?;
         let end = input.current_token_start();
-        ctx.comments.borrow_mut().push(start..end);
+        Ok(start..end)
+    }
+}
+
+/// Parse a comment and record its byte range in `ctx.comments`.
+///
+/// Safe to use as a committed alternative (e.g. inside `alt` in
+/// `spaces_tracking`): once the alternative is chosen the input is
+/// consumed and no outer production will backtrack past it.
+pub(super) fn comment_tracking<'a>(
+    ctx: &'a super::types::ParseContext<'a>,
+) -> impl ModalParser<StrStream<'a>, (), ContextError> + 'a {
+    move |input: &mut StrStream<'a>| {
+        let range = comment_span().parse_next(input)?;
+        ctx.comments.borrow_mut().push(range);
         Ok(())
     }
 }
@@ -992,38 +1013,49 @@ pub(super) fn spaces_tracking<'a>(
 }
 
 /// Like `linebreak()` but records comment-only lines into `ctx.comments`.
+///
+/// The span is only pushed after the trailing newline is confirmed, so a
+/// speculative match of a final no-newline comment does not leak a record.
 pub(super) fn linebreak_tracking<'a>(
     ctx: &'a super::types::ParseContext<'a>,
 ) -> impl ModalParser<StrStream<'a>, (), ContextError> + 'a {
     move |input: &mut StrStream<'a>| {
-        repeat::<_, _, (), _, _>(
-            0..,
-            (
-                take_while(0.., |c: char| c == ' ' || c == '\t'),
-                winnow::combinator::opt(comment_tracking(ctx)),
-                newline(),
-            )
-                .void(),
-        )
+        repeat::<_, _, (), _, _>(0.., {
+            let ctx = ctx;
+            move |input: &mut StrStream<'a>| {
+                take_while(0.., |c: char| c == ' ' || c == '\t').parse_next(input)?;
+                let maybe_range = winnow::combinator::opt(comment_span()).parse_next(input)?;
+                newline().parse_next(input)?;
+                if let Some(range) = maybe_range {
+                    ctx.comments.borrow_mut().push(range);
+                }
+                Ok(())
+            }
+        })
         .void()
         .parse_next(input)
     }
 }
 
 /// Like `newline_list()` but records comment-only lines into `ctx.comments`.
+///
+/// Same side-effect discipline as [`linebreak_tracking`].
 pub(super) fn newline_list_tracking<'a>(
     ctx: &'a super::types::ParseContext<'a>,
 ) -> impl ModalParser<StrStream<'a>, (), ContextError> + 'a {
     move |input: &mut StrStream<'a>| {
-        repeat::<_, _, (), _, _>(
-            1..,
-            (
-                take_while(0.., |c: char| c == ' ' || c == '\t'),
-                winnow::combinator::opt(comment_tracking(ctx)),
-                newline(),
-            )
-                .void(),
-        )
+        repeat::<_, _, (), _, _>(1.., {
+            let ctx = ctx;
+            move |input: &mut StrStream<'a>| {
+                take_while(0.., |c: char| c == ' ' || c == '\t').parse_next(input)?;
+                let maybe_range = winnow::combinator::opt(comment_span()).parse_next(input)?;
+                newline().parse_next(input)?;
+                if let Some(range) = maybe_range {
+                    ctx.comments.borrow_mut().push(range);
+                }
+                Ok(())
+            }
+        })
         .void()
         .parse_next(input)
     }

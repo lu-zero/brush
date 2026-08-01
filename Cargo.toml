@@ -106,6 +106,8 @@ extend-ignore-re = [
 "abd" = "abd"
 "hel" = "hel"
 "ba" = "ba"
+# Python package name used as an associative-array key in tests.
+"certifi" = "certifi"
 
 # This is a specific technical name.
 "iterm" = "iterm"

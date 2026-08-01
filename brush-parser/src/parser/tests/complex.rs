@@ -319,6 +319,51 @@ fn parse_comments_then_command() -> Result<()> {
     Ok(())
 }
 
+/// Winnow-only: verify comment spans are recorded exactly once per comment.
+///
+/// The PEG parser intentionally leaves `Program.comments` empty, so dual-parser
+/// comparison cannot cover this. These cases pin down the no-side-effect-on-
+/// backtrack discipline of the tracking whitespace parsers (a trailing
+/// no-newline comment used to be recorded three times).
+#[test]
+#[cfg(feature = "winnow-parser")]
+fn winnow_tracks_comment_spans_once() -> Result<()> {
+    use super::test_with_winnow;
+
+    let span_pairs = |p: &crate::ast::Program| {
+        p.comments
+            .iter()
+            .map(|c| (c.start.index, c.end.index))
+            .collect::<Vec<_>>()
+    };
+
+    // Comment only, with trailing newline.
+    let p = test_with_winnow("# hello\n")?;
+    if span_pairs(&p) != [(0, 7)] {
+        anyhow::bail!("expected one comment span 0..7, got {:?}", span_pairs(&p));
+    }
+
+    // Comment only, no trailing newline — must not double-count.
+    let p = test_with_winnow("# hello")?;
+    if span_pairs(&p) != [(0, 7)] {
+        anyhow::bail!(
+            "no-newline comment must be recorded once as 0..7, got {:?}",
+            span_pairs(&p)
+        );
+    }
+
+    // Two leading comments then a command.
+    let p = test_with_winnow("# comment\n# another\necho hi\n")?;
+    if span_pairs(&p) != [(0, 9), (10, 19)] {
+        anyhow::bail!(
+            "expected two comment spans 0..9 and 10..19, got {:?}",
+            span_pairs(&p)
+        );
+    }
+
+    Ok(())
+}
+
 /// Array assignment: VAR=( elem1 elem2 )
 #[test]
 fn parse_array_assignment() -> Result<()> {

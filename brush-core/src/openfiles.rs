@@ -466,8 +466,11 @@ where
 
 /// Async file abstractions for non-blocking I/O operations.
 pub mod async_file {
-    use std::io::{self, IsTerminal, Read as _, Write as _};
+    use std::io::{self, IsTerminal};
+    #[cfg(unix)]
+    use std::io::{Read as _, Write as _};
     use std::pin::Pin;
+    #[cfg(unix)]
     use std::sync::Arc;
     use std::task::{Context, Poll};
 

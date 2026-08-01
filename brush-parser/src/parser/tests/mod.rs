@@ -113,6 +113,14 @@ fn normalize_source_span(value: &mut Value) {
 #[allow(clippy::expect_used)]
 fn normalize_ast(program: &Program) -> Value {
     let mut value = serde_json::to_value(program).expect("Failed to serialize Program to JSON");
+    // `Program.comments` is only populated by the winnow parser (the PEG parser
+    // always leaves it empty). Drop the field so dual-parser AST comparison is
+    // not poisoned by that intentional asymmetry — and so the location-redaction
+    // pass does not treat the comments vec as a "tuple with trailing SourceSpan"
+    // and pop its last element.
+    if let Value::Object(map) = &mut value {
+        map.remove("comments");
+    }
     redact_locations(&mut value);
     value
 }
