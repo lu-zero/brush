@@ -72,6 +72,32 @@ impl<SE: ShellExtensions> ExecutionContext<'_, SE> {
     pub fn iter_fds(&self) -> impl Iterator<Item = (ShellFd, openfiles::OpenFile)> {
         self.params.iter_fds(self.shell)
     }
+
+    /// Tries to retrieve an async view of the file descriptor.
+    ///
+    /// Returns `None` if the file descriptor is not open.
+    ///
+    /// # Arguments
+    ///
+    /// * `fd` - The file descriptor number to retrieve.
+    pub fn try_fd_async(&self, fd: ShellFd) -> Option<openfiles::async_file::AsyncOpenFile> {
+        self.params.try_fd_async(self.shell, fd)
+    }
+
+    /// Tries to retrieve standard input as an async file.
+    pub fn stdin_async(&self) -> Option<openfiles::async_file::AsyncOpenFile> {
+        self.params.try_stdin_async(self.shell)
+    }
+
+    /// Tries to retrieve standard output as an async file.
+    pub fn stdout_async(&self) -> Option<openfiles::async_file::AsyncOpenFile> {
+        self.params.try_stdout_async(self.shell)
+    }
+
+    /// Tries to retrieve standard error as an async file.
+    pub fn stderr_async(&self) -> Option<openfiles::async_file::AsyncOpenFile> {
+        self.params.try_stderr_async(self.shell)
+    }
 }
 
 /// An argument to a command.
