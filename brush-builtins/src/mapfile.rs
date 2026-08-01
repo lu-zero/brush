@@ -84,12 +84,19 @@ impl builtins::Command for MapFileCommand {
             }
         }
 
-        let input_file = context
-            .try_fd(self.fd)
+        let input_file_async = context
+            .try_fd_async(self.fd)
             .ok_or_else(|| ErrorKind::BadFileDescriptor(self.fd))?;
 
-        // Read!
-        let results = self.read_entries(input_file)?;
+        // Terminals need blocking I/O for mode setup; files/pipes use async reads.
+        let results = if input_file_async.is_terminal() {
+            let input_file = context
+                .try_fd(self.fd)
+                .ok_or_else(|| ErrorKind::BadFileDescriptor(self.fd))?;
+            self.read_entries_blocking(input_file)?
+        } else {
+            self.read_entries(input_file_async).await?
+        };
 
         if let Some(origin) = self.origin {
             // -O: preserve existing array, assign at offset.
@@ -122,21 +129,29 @@ impl builtins::Command for MapFileCommand {
 }
 
 impl MapFileCommand {
-    fn read_entries(
+    fn read_entries_blocking(
         &self,
         mut input_file: brush_core::openfiles::OpenFile,
     ) -> Result<variables::ArrayLiteral, brush_core::Error> {
         let _term_mode = setup_terminal_settings(&input_file)?;
+        self.collect_entries(|buf| input_file.read(buf))
+    }
 
+    async fn read_entries(
+        &self,
+        mut input_file: brush_core::openfiles::async_file::AsyncOpenFile,
+    ) -> Result<variables::ArrayLiteral, brush_core::Error> {
+        self.collect_entries_async(&mut input_file).await
+    }
+
+    fn collect_entries(
+        &self,
+        mut read_byte: impl FnMut(&mut [u8]) -> std::io::Result<usize>,
+    ) -> Result<variables::ArrayLiteral, brush_core::Error> {
         let mut entries = vec![];
         let mut read_count = 0;
         let max_count = self.max_count.try_into()?;
-        let delimiter = match &self.delimiter {
-            Some(d) if d.is_empty() => b'\0',
-            Some(d) => d.as_bytes().first().copied().unwrap_or(b'\n'),
-            None => b'\n',
-        };
-
+        let delimiter = Self::delimiter_byte(self.delimiter.as_deref());
         let mut buf = [0u8; 1];
 
         while max_count == 0 || entries.len() < max_count {
@@ -144,10 +159,10 @@ impl MapFileCommand {
             let mut saw_delimiter = false;
 
             loop {
-                match input_file.read(&mut buf) {
-                    Ok(0) => break,                                         // End of input
-                    Ok(1) if buf[0] == b'\x03' => break,                    // Ctrl+C
-                    Ok(1) if buf[0] == b'\x04' && line.is_empty() => break, // Ctrl+D
+                match read_byte(&mut buf) {
+                    Ok(0) => break,
+                    Ok(1) if buf[0] == b'\x03' => break,
+                    Ok(1) if buf[0] == b'\x04' && line.is_empty() => break,
                     Ok(1) => {
                         let byte = buf[0];
                         line.push(byte);
@@ -175,14 +190,72 @@ impl MapFileCommand {
             }
 
             let line_str = String::from_utf8_lossy(&line).to_string();
-
             entries.push((None, line_str));
         }
 
         Ok(variables::ArrayLiteral(entries))
     }
-}
 
+    async fn collect_entries_async(
+        &self,
+        input_file: &mut brush_core::openfiles::async_file::AsyncOpenFile,
+    ) -> Result<variables::ArrayLiteral, brush_core::Error> {
+        let mut entries = vec![];
+        let mut read_count = 0;
+        let max_count = self.max_count.try_into()?;
+        let delimiter = Self::delimiter_byte(self.delimiter.as_deref());
+        let mut buf = [0u8; 1];
+
+        while max_count == 0 || entries.len() < max_count {
+            let mut line = vec![];
+            let mut saw_delimiter = false;
+
+            loop {
+                match input_file.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(1) if buf[0] == b'\x03' => break,
+                    Ok(1) if buf[0] == b'\x04' && line.is_empty() => break,
+                    Ok(1) => {
+                        let byte = buf[0];
+                        line.push(byte);
+                        if byte == delimiter {
+                            saw_delimiter = true;
+                            break;
+                        }
+                    }
+                    Ok(_) => unreachable!("input can only be 0, 1, or error"),
+                    Err(e) => return Err(e.into()),
+                }
+            }
+
+            if line.is_empty() && !saw_delimiter {
+                break;
+            }
+
+            if read_count < self.skip_count {
+                read_count += 1;
+                continue;
+            }
+
+            if self.remove_delimiter && line.ends_with(&[delimiter]) {
+                line.pop();
+            }
+
+            let line_str = String::from_utf8_lossy(&line).to_string();
+            entries.push((None, line_str));
+        }
+
+        Ok(variables::ArrayLiteral(entries))
+    }
+
+    fn delimiter_byte(delimiter: Option<&str>) -> u8 {
+        match delimiter {
+            Some(d) if d.is_empty() => b'\0',
+            Some(d) => d.as_bytes().first().copied().unwrap_or(b'\n'),
+            None => b'\n',
+        }
+    }
+}
 fn setup_terminal_settings(
     file: &brush_core::openfiles::OpenFile,
 ) -> Result<Option<brush_core::terminal::AutoModeGuard>, brush_core::Error> {
