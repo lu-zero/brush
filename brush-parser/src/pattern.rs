@@ -112,7 +112,28 @@ peg::parser! {
             // Escape opening bracket.
             ['['] { (String::from(r"\["), '[') } /
             // Any other character except closing bracket gets added as-is.
-            [c if c != ']'] { (c.to_string(), c) }
+            // A bare (unescaped) '/' is excluded: pathname expansion always
+            // splits on '/' into path components *before* bracket-expression
+            // parsing (see `split_path_for_pattern`), so a '/' can never
+            // actually appear inside a real bracket expression — it always
+            // ends the current path component first. Without this, a plain
+            // word like `foo[bar/baz]` (e.g. a pytest node id such as
+            // `test_path_to_uri[test.mp3-file-file:///test.mp3]` — a real
+            // EPYTEST_DESELECT entry from gentoo GURU's mopidy ebuilds) is
+            // wrongly parsed as one complete bracket expression spanning the
+            // slash, so `has_glob_metacharacters` reports true and
+            // `requires_expansion` sends it down the real glob-matching path
+            // (patterns.rs). Once split, the component containing the
+            // now-unterminated `[` is treated as a literal path segment that
+            // doesn't exist on disk, so the whole expansion resolves to zero
+            // paths — an `Expanded([])`, i.e. an *unmatched glob* — even
+            // though real bash never attempted an expansion at all here
+            // (confirmed live: `shopt -s failglob; echo a[b/c]` prints the
+            // word unchanged, while `echo a[bc]x` with no real match errors
+            // with "no match"). Under EAPI 6+'s global-scope failglob (PMS
+            // 6, Table 6.1), that phantom "unmatched glob" wrongly aborts
+            // sourcing an otherwise-valid ebuild.
+            [c if c != ']' && c != '/'] { (c.to_string(), c) }
 
         rule wildcard() -> String =
             "?" { String::from(".") } /
