@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
-use brush_builtins::{BuiltinSet, ShellBuilderExt as _};
+use brush_builtins::{BuiltinSet, ShellExt as _};
 use brush_core::{
     ExecutionResult, ShellFd,
     extensions::{DefaultErrorFormatter, ProcessLauncher, ShellExtensionsImpl},
@@ -139,10 +139,10 @@ type Host = ShellExtensionsImpl<DefaultErrorFormatter, RecordingLauncher>;
 /// the shell.
 async fn run(launcher: &RecordingLauncher, script: &str) -> Result<brush_core::Shell<Host>> {
     let mut shell = brush_core::Shell::builder_with_extensions::<Host>()
-        .default_builtins(BuiltinSet::BashMode)
         .process_launcher(launcher.clone())
         .build()
         .await?;
+    shell.register_default_builtins(BuiltinSet::BashMode);
 
     let params = shell.default_exec_params();
     shell
@@ -199,10 +199,10 @@ async fn a_standard_stream_the_shell_lacks_is_launched_closed() -> Result<()> {
     // of the shell process's own, as they'd get none of a stream the shell closed.
     let launcher = RecordingLauncher::default();
     let mut shell = brush_core::Shell::builder_with_extensions::<Host>()
-        .default_builtins(BuiltinSet::BashMode)
         .process_launcher(launcher.clone())
         .build()
         .await?;
+    shell.register_default_builtins(BuiltinSet::BashMode);
     *shell.open_files_mut() = OpenFiles::default();
 
     let params = shell.default_exec_params();
@@ -263,12 +263,13 @@ async fn shell_with_inherited_underscore(
 ) -> Result<brush_core::Shell<Host>> {
     let mut underscore = brush_core::ShellVariable::new("/from/parent");
     underscore.export();
-    Ok(brush_core::Shell::builder_with_extensions::<Host>()
-        .default_builtins(BuiltinSet::BashMode)
+    let mut shell = brush_core::Shell::builder_with_extensions::<Host>()
         .var("_", underscore)
         .process_launcher(launcher.clone())
         .build()
-        .await?)
+        .await?;
+    shell.register_default_builtins(BuiltinSet::BashMode);
+    Ok(shell)
 }
 
 #[tokio::test]

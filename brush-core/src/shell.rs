@@ -128,7 +128,12 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 
     /// Shell built-in commands.
     #[cfg_attr(feature = "serde", serde(skip))]
-    builtins: HashMap<String, builtins::Registration<SE>>,
+    pub(crate) builtins: HashMap<String, builtins::Registration<SE>>,
+
+    /// Cross-builtin shared state, keyed by `TypeId` of the shared value.
+    /// Seeded via [`Shell::register_shared`] or [`Shell::set_shared`].
+    #[cfg_attr(feature = "serde", serde(skip, default))]
+    pub(crate) shared_states: HashMap<std::any::TypeId, Box<dyn builtins::AnyState>>,
 
     /// Shell program location cache.
     program_location_cache: pathcache::PathCache,
@@ -185,6 +190,11 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
             // (e.g. with `compopt`), which its parent doesn't see.
             completion: self.completion.clone(),
             builtins: self.builtins.clone(),
+            shared_states: self
+                .shared_states
+                .iter()
+                .map(|(k, v)| (*k, v.clone()))
+                .collect(),
             program_location_cache: self.program_location_cache.clone(),
             last_stopwatch_time: self.last_stopwatch_time,
             last_stopwatch_offset: self.last_stopwatch_offset,
@@ -230,11 +240,15 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
             version: options.shell_version,
             product_display_str: options.shell_product_display_str,
             working_dir: options.working_dir.map_or_else(std::env::current_dir, Ok)?,
-            builtins: options.builtins,
+            builtins: HashMap::default(),
             parser_impl: options.parser,
             key_bindings: options.key_bindings,
             ..Self::default()
         };
+
+        for (name, reg) in options.builtins {
+            shell.builtins.insert(name, reg.into_registered());
+        }
 
         // Add in any open files provided.
         shell.open_files.update_from(options.fds.into_iter());

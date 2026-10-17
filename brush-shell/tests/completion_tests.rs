@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use assert_fs::prelude::*;
-use brush_builtins::ShellBuilderExt;
+use brush_builtins::ShellExt;
 use std::path::PathBuf;
 
 /// Returns each candidate in `completions`.
@@ -44,11 +44,11 @@ impl TestShell {
         let mut shell = brush_core::Shell::builder()
             .profile(brush_core::ProfileLoadBehavior::Skip)
             .rc(brush_core::RcLoadBehavior::Skip)
-            .default_builtins(brush_builtins::BuiltinSet::BashMode)
             // Don't leave external commands running when a test drops a completion.
             .kill_external_commands_on_drop(true)
             .build()
             .await?;
+        shell.register_default_builtins(brush_builtins::BuiltinSet::BashMode);
 
         let temp_dir = assert_fs::TempDir::new()?;
         shell.set_working_dir(temp_dir.path())?;
@@ -483,11 +483,11 @@ async fn interactive_completion_sets_comp_key_and_comp_type() -> Result<()> {
     let mut shell = brush_core::Shell::builder()
         .profile(brush_core::ProfileLoadBehavior::Skip)
         .rc(brush_core::RcLoadBehavior::Skip)
-        .default_builtins(brush_builtins::BuiltinSet::BashMode)
         // Don't leave external commands running when a test drops a completion.
         .kill_external_commands_on_drop(true)
         .build()
         .await?;
+    shell.register_default_builtins(brush_builtins::BuiltinSet::BashMode);
 
     // Register a completion function that captures COMP_KEY and COMP_TYPE.
     let exec_params = shell.default_exec_params();
