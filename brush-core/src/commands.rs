@@ -68,6 +68,7 @@ impl<SE: ShellExtensions> ExecutionContext<'_, SE> {
     pub fn iter_fds(&self) -> impl Iterator<Item = (ShellFd, openfiles::OpenFile)> {
         self.params.iter_fds(self.shell)
     }
+
     /// Returns a shared reference to the state of the currently executing builtin.
     ///
     /// Uses `self.command_name` as the lookup key and `B::State` as the expected
@@ -99,6 +100,31 @@ impl<SE: ShellExtensions> ExecutionContext<'_, SE> {
         self.shell
             .builtin_state_mut_of::<B>(&name)
             .ok_or_else(|| error::ErrorKind::BuiltinStateNotRegistered(name).into())
+    }
+
+    /// Returns the file descriptor as an async file. Returns `None`
+    /// if the file descriptor is not open.
+    ///
+    /// # Arguments
+    ///
+    /// * `fd` - The file descriptor number to retrieve.
+    pub fn try_fd_async(&self, fd: ShellFd) -> Option<openfiles::async_file::AsyncOpenFile> {
+        self.params.try_fd_async(self.shell, fd)
+    }
+
+    /// Returns the standard input as an async file.
+    pub fn stdin_async(&self) -> Option<openfiles::async_file::AsyncOpenFile> {
+        self.params.try_stdin_async(self.shell)
+    }
+
+    /// Returns the standard output as an async file.
+    pub fn stdout_async(&self) -> Option<openfiles::async_file::AsyncOpenFile> {
+        self.params.try_stdout_async(self.shell)
+    }
+
+    /// Returns the standard error as an async file.
+    pub fn stderr_async(&self) -> Option<openfiles::async_file::AsyncOpenFile> {
+        self.params.try_stderr_async(self.shell)
     }
 
     /// Returns a shared reference to the cross-builtin shared state of type `T`.
