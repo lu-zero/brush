@@ -763,6 +763,13 @@ async fn execute_builtin_command<SE: extensions::ShellExtensions>(
     // In POSIX mode, special builtins that return errors are to be treated as fatal.
     let mark_errors_fatal = builtin.is_special() && context.shell.options().posix_mode;
 
+    // The invoked name arrives as args[0] but is already carried by
+    // `context.command_name`; builtins receive only what followed it.
+    let mut args = args;
+    if !args.is_empty() {
+        args.remove(0);
+    }
+
     match builtin.execute(context, args).await {
         Ok(result) => Ok(result),
         Err(e) => {
