@@ -80,7 +80,7 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for KillCommand {
 
         // With -l, the remaining args are signals (or exit statuses) to look up.
         if self.list_signals {
-            return print_signals(&context, self.args.as_ref());
+            return print_signals(&context, self.args.as_ref()).await;
         }
 
         // Look through the remaining args for a pid/job spec or a -sigspec style option.
@@ -151,11 +151,14 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for KillCommand {
     }
 }
 
-fn print_signals(
+async fn print_signals(
     context: &brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
     signals: &[String],
 ) -> Result<ExecutionResult, brush_core::Error> {
     let mut exit_code = ExecutionResult::success();
+    let mut output = Vec::new();
+    let mut stderr_output = Vec::new();
+
     if !signals.is_empty() {
         for s in signals {
             // If the user gives us a code, we print the name; if they give a name, we print its
@@ -187,23 +190,37 @@ fn print_signals(
 
             match signal {
                 Ok(PrintSignal::Num(n)) => {
-                    writeln!(context.stdout(), "{n}")?;
+                    writeln!(output, "{n}")?;
                 }
                 Ok(PrintSignal::Name(s)) => {
-                    writeln!(context.stdout(), "{s}")?;
+                    writeln!(output, "{s}")?;
                 }
                 Err(e) => {
-                    writeln!(context.stderr(), "{e}")?;
+                    writeln!(stderr_output, "{e}")?;
                     exit_code = ExecutionResult::general_error();
                 }
             }
         }
     } else {
-        return brush_core::traps::format_signals(
-            context.stdout(),
+        brush_core::traps::format_signals(
+            &mut output,
             TrapSignal::iterator().filter(|s| !matches!(s, TrapSignal::Exit)),
-        )
-        .map(|()| ExecutionResult::success());
+        )?;
+    }
+
+    if !output.is_empty() {
+        if let Some(mut stdout) = context.stdout_async() {
+            stdout.write_all(&output).await?;
+            stdout.flush().await?;
+        } else {
+            context.stdout().write_all(&output)?;
+            context.stdout().flush()?;
+        }
+    }
+
+    if !stderr_output.is_empty() {
+        context.stderr().write_all(&stderr_output)?;
+        context.stderr().flush()?;
     }
 
     Ok(exit_code)
