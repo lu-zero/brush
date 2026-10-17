@@ -36,8 +36,8 @@ impl builtins::Command for CallerCommand {
         let line = calling_frame.current_line().unwrap_or(1);
         let filename = &calling_frame.source_info.source;
 
-        // When the expr is provided, we display "LINE FUNCTION_NAME FILENAME"
-        // When the expr is omitted, we only display "LINE FILENAME"
+        let mut output = Vec::new();
+
         if self.expr.is_some() {
             let function_name = match &calling_frame.frame_type {
                 callstack::FrameType::Function(func_call) => func_call.name(),
@@ -45,9 +45,17 @@ impl builtins::Command for CallerCommand {
                 _ => "".into(),
             };
 
-            writeln!(context.stdout(), "{line} {function_name} {filename}")?;
+            writeln!(output, "{line} {function_name} {filename}")?;
         } else {
-            writeln!(context.stdout(), "{line} {filename}")?;
+            writeln!(output, "{line} {filename}")?;
+        }
+
+        if let Some(mut stdout) = context.stdout_async() {
+            stdout.write_all(&output).await?;
+            stdout.flush().await?;
+        } else {
+            context.stdout().write_all(&output)?;
+            context.stdout().flush()?;
         }
 
         Ok(ExecutionResult::success())
