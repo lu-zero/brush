@@ -4,13 +4,27 @@
 #![allow(clippy::panic_in_result_fn)]
 
 use anyhow::Result;
-use brush_core::{ExecutionResult, builtins};
-use clap::Parser;
+use brush_core::{CommandArg, ExecutionResult, builtins};
 
 /// Adds the step its name gives (`by<step>`) to a running total, and returns
 /// the total as its status.
-#[derive(Parser)]
-struct Counter {}
+struct Counter;
+
+impl builtins::FromArgs for Counter {
+    fn from_args(_name: &str, _args: Vec<CommandArg>) -> Result<Self, builtins::ArgsError> {
+        Ok(Self)
+    }
+}
+
+impl builtins::HelpContent for Counter {
+    fn synopsis(name: &str) -> String {
+        name.to_owned()
+    }
+
+    fn description(_name: &str) -> String {
+        "add to a running total".to_owned()
+    }
+}
 
 /// The total the counters share: their state.
 #[derive(Clone, Default)]

@@ -1,5 +1,4 @@
 use brush_core::{ExecutionResult, builtins, error, history};
-use clap::Parser;
 use std::{
     io::Write,
     path::{Path, PathBuf},
@@ -7,8 +6,12 @@ use std::{
 
 /// Query or manipulate the shell's command history.
 // TODO(history): Evaluate which of the options conflict with each other.
-#[derive(Parser)]
-#[expect(clippy::option_option)]
+/// Bound to a bare `-a`, `-n`, `-r` or `-w`: the default history file.
+const NO_FILE: &str = "\u{0}";
+
+/// Query or manipulate the shell's command history.
+#[derive(winnow_args::Args)]
+#[arg(disable_help_short, disable_version_flag, disable_help_subcommand)]
 pub(crate) struct HistoryCommand {
     /// Clears all history.
     #[arg(short = 'c')]
@@ -16,35 +19,35 @@ pub(crate) struct HistoryCommand {
 
     /// Deletes the history entry at the given offset. Positive offsets are relative to the
     /// beginning of the history, while negative offsets are relative to the end of the history.
-    #[arg(short = 'd', value_name = "OFFSET")]
+    #[arg(short = 'd', value_name = "OFFSET", allow_negative_numbers)]
     delete_offset: Option<i64>,
 
     /// Appends the history from the current session to the history file.
-    #[arg(short = 'a', group = "anrw", num_args = 0..=1, value_name = "HIST_FILE")]
-    append_session_to_file: Option<Option<String>>,
+    #[arg(short = 'a', value_name = "HIST_FILE", default_missing = "\u{0}")]
+    append_session_to_file: Option<String>,
 
     /// Appends any remaining history from the history file to the current session.
-    #[arg(short = 'n', group = "anrw", num_args = 0..=1, value_name = "HIST_FILE")]
-    append_rest_of_file_to_session: Option<Option<String>>,
+    #[arg(short = 'n', value_name = "HIST_FILE", default_missing = "\u{0}")]
+    append_rest_of_file_to_session: Option<String>,
 
     /// Appends the history from the history file to the current session.
-    #[arg(short = 'r', group = "anrw", num_args = 0..=1, value_name = "HIST_FILE")]
-    append_file_to_session: Option<Option<String>>,
+    #[arg(short = 'r', value_name = "HIST_FILE", default_missing = "\u{0}")]
+    append_file_to_session: Option<String>,
 
     /// Replaces the history file with the current session history.
-    #[arg(short = 'w', group = "anrw", num_args = 0..=1, value_name = "HIST_FILE")]
-    write_session_to_file: Option<Option<String>>,
+    #[arg(short = 'w', value_name = "HIST_FILE", default_missing = "\u{0}")]
+    write_session_to_file: Option<String>,
 
     /// History-expands positional arguments and displays them.
-    #[arg(short = 'p', num_args = 0.., value_name = "ARG")]
-    expand_args: Option<Vec<String>>,
+    #[arg(short = 'p')]
+    expand: bool,
 
     /// Appends positional arguments as an entry in the current session.
-    #[arg(short = 's', num_args = 0.., value_name = "ARG")]
-    append_args_to_session: Option<Vec<String>>,
+    #[arg(short = 's')]
+    append: bool,
 
     /// Arguments.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    #[arg(positional, double_dash = "automatic", allow_negative_numbers)]
     args: Vec<String>,
 }
 
@@ -52,6 +55,8 @@ struct HistoryConfig {
     default_history_file_path: Option<PathBuf>,
     time_format: Option<String>,
 }
+
+brush_builtin_winnow::winnow_builtin!(HistoryCommand);
 
 impl builtins::Command for HistoryCommand {
     type Error = brush_core::Error;
@@ -132,7 +137,7 @@ impl HistoryCommand {
         if let Some(append_option) = &self.append_session_to_file {
             if let Some(file_path) = get_effective_history_file_path(
                 config.default_history_file_path.as_deref(),
-                append_option.as_deref(),
+                Some(append_option.as_str()).filter(|f| *f != NO_FILE),
             ) {
                 history.flush(file_path, true, true, config.time_format.is_some())?;
             }
@@ -151,7 +156,7 @@ impl HistoryCommand {
         if let Some(write_option) = &self.write_session_to_file {
             if let Some(file_path) = get_effective_history_file_path(
                 config.default_history_file_path.as_deref(),
-                write_option.as_deref(),
+                Some(write_option.as_str()).filter(|f| *f != NO_FILE),
             ) {
                 history.flush(file_path, false, false, config.time_format.is_some())?;
             }
@@ -159,12 +164,12 @@ impl HistoryCommand {
             return Ok((Vec::new(), Vec::new()));
         }
 
-        if self.expand_args.is_some() {
+        if self.expand {
             return error::unimp("history -p is not yet implemented");
         }
 
-        if let Some(args) = &self.append_args_to_session {
-            history.add(history::Item::new(args.join(" ")))?;
+        if self.append {
+            history.add(history::Item::new(self.args.join(" ")))?;
             return Ok((Vec::new(), Vec::new()));
         }
 
@@ -216,4 +221,33 @@ fn get_effective_history_file_path<'a>(
     option: Option<&'a str>,
 ) -> Option<&'a Path> {
     option.map(Path::new).or(default_history_file_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use brush_core::CommandArg;
+    use brush_core::builtins::FromArgs;
+    use pretty_assertions::{assert_eq, assert_matches};
+
+    #[test]
+    fn test_parse_dash_a() -> Result<()> {
+        let cmd = HistoryCommand::from_args("history", vec![CommandArg::String("5".into())])?;
+        assert_matches!(cmd.append_session_to_file, None);
+
+        let cmd = HistoryCommand::from_args("history", vec![CommandArg::String("-a".into())])?;
+        assert_eq!(cmd.append_session_to_file.as_deref(), Some(NO_FILE));
+
+        let cmd = HistoryCommand::from_args(
+            "history",
+            vec![
+                CommandArg::String("-a".into()),
+                CommandArg::String("token".into()),
+            ],
+        )?;
+        assert_eq!(cmd.append_session_to_file.as_deref(), Some("token"));
+
+        Ok(())
+    }
 }

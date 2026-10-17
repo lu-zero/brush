@@ -26,7 +26,8 @@ async fn a_builtin_runs_in_a_context_made_by_hand() -> Result<()> {
     params.set_fd(OpenFiles::STDOUT_FD, writer.into());
 
     let context = ExecutionContext::new(&mut shell, "echo".into(), params);
-    let args = ["echo", "hello", "world"]
+    // The arguments follow the name, which the context carries.
+    let args = ["hello", "world"]
         .map(|arg| CommandArg::String(arg.into()))
         .into();
     let result = echo.execute(context, args).await?;
