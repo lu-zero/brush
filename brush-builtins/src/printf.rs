@@ -40,11 +40,11 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for PrintfCommand {
             return Ok(ExecutionResult::new(2));
         }
 
-        if let Some(variable_name) = self.output_variables.last() {
-            // Format to a u8 vector.
-            let mut result: Vec<u8> = vec![];
-            format(self.format_and_args.as_slice(), &mut result)?;
+        // Format to a u8 vector.
+        let mut result: Vec<u8> = vec![];
+        format(self.format_and_args.as_slice(), &mut result)?;
 
+        if let Some(variable_name) = self.output_variables.last() {
             // Convert to a string.
             let result_str = String::from_utf8(result).map_err(|_| {
                 brush_core::ErrorKind::PrintfInvalidUsage("invalid UTF-8 output".into())
@@ -59,8 +59,13 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for PrintfCommand {
             )
             .await?;
         } else {
-            format(self.format_and_args.as_slice(), context.stdout())?;
-            context.stdout().flush()?;
+            if let Some(mut stdout) = context.stdout_async() {
+                stdout.write_all(&result).await?;
+                stdout.flush().await?;
+            } else {
+                context.stdout().write_all(&result)?;
+                context.stdout().flush()?;
+            }
         }
 
         Ok(ExecutionResult::success())

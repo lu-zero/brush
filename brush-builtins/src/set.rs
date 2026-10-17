@@ -124,7 +124,7 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for SetCommand {
         self,
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<ExecutionResult, Self::Error> {
-        let mut stdout = context.stdout();
+        let mut output = Vec::new();
 
         for option in &self.options {
             let options = context.shell.options_mut();
@@ -156,7 +156,7 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for SetCommand {
                     options.shell_functions_inherit_debug_and_return_traps = *on;
                 }
                 SetOption::Named(on, name) if name.is_empty() => {
-                    list_named_options(&context, *on, &mut stdout)?;
+                    list_named_options(&context, *on, &mut output)?;
                 }
                 SetOption::Named(on, name) => {
                     let named = brush_core::namedoptions::options(
@@ -164,6 +164,16 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for SetCommand {
                     );
                     let Some(definition) = named.get(name.as_str()) else {
                         // Like bash, stop at the bad name: what follows is not applied.
+                        // What was listed before it still comes out first.
+                        if !output.is_empty() {
+                            if let Some(mut stdout) = context.stdout_async() {
+                                stdout.write_all(&output).await?;
+                                stdout.flush().await?;
+                            } else {
+                                context.stdout().write_all(&output)?;
+                                context.stdout().flush()?;
+                            }
+                        }
                         writeln!(
                             context.stderr(),
                             "{}: {name}: invalid option name",
@@ -208,10 +218,18 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for SetCommand {
         }
 
         if self.options.is_empty() && self.positional_args.is_empty() {
-            stdout.write_all(&display_all(&context)?)?;
+            output.extend(display_all(&context)?);
         }
 
-        stdout.flush()?;
+        if !output.is_empty() {
+            if let Some(mut stdout) = context.stdout_async() {
+                stdout.write_all(&output).await?;
+                stdout.flush().await?;
+            } else {
+                context.stdout().write_all(&output)?;
+                context.stdout().flush()?;
+            }
+        }
 
         Ok(ExecutionResult::success())
     }

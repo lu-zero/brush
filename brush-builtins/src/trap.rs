@@ -29,15 +29,33 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for TrapCommand {
         mut context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<ExecutionResult, Self::Error> {
         if self.list_signals {
-            brush_core::traps::format_signals(context.stdout(), TrapSignal::iterator())
-                .map(|()| ExecutionResult::success())
+            let mut output = Vec::new();
+            brush_core::traps::format_signals(&mut output, TrapSignal::iterator())?;
+            if let Some(mut stdout) = context.stdout_async() {
+                stdout.write_all(&output).await?;
+                stdout.flush().await?;
+            } else {
+                context.stdout().write_all(&output)?;
+                context.stdout().flush()?;
+            }
+            Ok(ExecutionResult::success())
         } else if self.print_trap_commands || self.args.is_empty() {
+            let mut output = Vec::new();
             if !self.args.is_empty() {
                 for signal_type in &self.args {
-                    Self::display_handlers_for(&context, signal_type.parse()?)?;
+                    Self::display_handlers_for(&context, signal_type.parse()?, &mut output)?;
                 }
             } else {
-                Self::display_all_handlers(&context)?;
+                Self::display_all_handlers(&context, &mut output)?;
+            }
+            if !output.is_empty() {
+                if let Some(mut stdout) = context.stdout_async() {
+                    stdout.write_all(&output).await?;
+                    stdout.flush().await?;
+                } else {
+                    context.stdout().write_all(&output)?;
+                    context.stdout().flush()?;
+                }
             }
             Ok(ExecutionResult::success())
         } else {
@@ -76,9 +94,10 @@ impl<SE: brush_core::ShellExtensions> builtins::Builtin<SE> for TrapCommand {
 impl TrapCommand {
     fn display_all_handlers(
         context: &brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
+        output: &mut Vec<u8>,
     ) -> Result<(), brush_core::Error> {
         for (signal, _) in context.shell.traps().iter_handlers() {
-            Self::display_handlers_for(context, signal)?;
+            Self::display_handlers_for(context, signal, output)?;
         }
         Ok(())
     }
@@ -86,13 +105,10 @@ impl TrapCommand {
     fn display_handlers_for(
         context: &brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
         signal_type: TrapSignal,
+        output: &mut Vec<u8>,
     ) -> Result<(), brush_core::Error> {
         if let Some(handler) = context.shell.traps().get_handler(signal_type) {
-            writeln!(
-                context.stdout(),
-                "trap -- '{}' {signal_type}",
-                handler.command
-            )?;
+            writeln!(output, "trap -- '{}' {signal_type}", handler.command)?;
         }
         Ok(())
     }
