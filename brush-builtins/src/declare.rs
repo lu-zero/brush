@@ -1082,8 +1082,6 @@ impl DeclareCommand {
             EnvironmentLookup::Anywhere
         };
 
-        // Iterate through an ordered list of all matching declarations tracked in the
-        // environment.
         for (name, variable) in context
             .shell
             .env()
