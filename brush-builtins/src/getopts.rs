@@ -1,7 +1,5 @@
 use std::{collections::HashMap, io::Write};
 
-use clap::Parser;
-
 use brush_core::{ExecutionResult, builtins, variables};
 
 const DEFAULT_NEXT_CHAR_INDEX: usize = 1;
@@ -22,18 +20,26 @@ impl Default for GetOptsState {
 }
 
 /// Parse command options.
-#[derive(Parser)]
+#[derive(winnow_args::Args)]
+#[arg(
+    unknown_flags = "value",
+    disable_help_flag,
+    disable_version_flag,
+    disable_help_subcommand
+)]
 pub(crate) struct GetOptsCommand {
     /// Specification for options
+    #[arg(positional)]
     options_string: String,
-
     /// Name of variable to receive next option
+    #[arg(positional)]
     variable_name: String,
-
     /// Arguments to parse
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    #[arg(positional, double_dash = "preserve")]
     args: Vec<String>,
 }
+
+brush_builtin_winnow::winnow_builtin!(GetOptsCommand, trailing_args = args);
 
 /// The result of processing one option from the argument list.
 struct GetOptsResult {
@@ -82,17 +88,6 @@ impl builtins::Command for GetOptsCommand {
     type State = GetOptsState;
     type SharedState = ();
     type Error = brush_core::Error;
-
-    fn new<I>(args: I) -> Result<Self, clap::Error>
-    where
-        I: IntoIterator<Item = String>,
-    {
-        let (mut this, rest_args) = brush_core::builtins::try_parse_known::<Self>(args)?;
-        if let Some(args) = rest_args {
-            this.args.extend(args);
-        }
-        Ok(this)
-    }
 
     async fn execute<SE: brush_core::ShellExtensions>(
         &self,

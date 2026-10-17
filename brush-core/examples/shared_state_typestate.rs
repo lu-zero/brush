@@ -14,9 +14,28 @@ use brush_core::{ExecutionContext, ExecutionResult};
 #[allow(dead_code)]
 struct Counter(usize);
 
-/// A trivial builtin whose `SharedState` is `Counter`.
-#[derive(Default, clap::Parser)]
+/// A trivial builtin whose `SharedState` is `Counter`. It takes no arguments.
+#[derive(Default)]
 struct TempCommand;
+
+impl builtins::FromArgs for TempCommand {
+    fn from_args(
+        _name: &str,
+        _args: Vec<brush_core::CommandArg>,
+    ) -> Result<Self, builtins::ArgsError> {
+        Ok(Self)
+    }
+}
+
+impl builtins::HelpContent for TempCommand {
+    fn synopsis(name: &str) -> String {
+        name.to_owned()
+    }
+
+    fn description(_name: &str) -> String {
+        "do nothing".to_owned()
+    }
+}
 
 impl builtins::Command for TempCommand {
     type State = ();

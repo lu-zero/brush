@@ -1,4 +1,4 @@
-use brush_core::builtins::{builtin, decl_builtin, raw_arg_builtin, simple_builtin};
+use brush_core::builtins::builtin;
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
@@ -33,7 +33,7 @@ pub fn register_default_builtins<SE: brush_core::ShellExtensions>(
     #[cfg(feature = "builtin.break")]
     shell.register_builtin("break", builtin::<break_::BreakCommand, SE>().special());
     #[cfg(feature = "builtin.colon")]
-    shell.register_builtin(":", simple_builtin::<colon::ColonCommand, SE>().special());
+    shell.register_builtin(":", builtin::<colon::ColonCommand, SE>().special());
     #[cfg(feature = "builtin.continue")]
     shell.register_builtin(
         "continue",
@@ -48,10 +48,7 @@ pub fn register_default_builtins<SE: brush_core::ShellExtensions>(
     #[cfg(feature = "builtin.exit")]
     shell.register_builtin("exit", builtin::<exit::ExitCommand, SE>().special());
     #[cfg(feature = "builtin.export")]
-    shell.register_builtin(
-        "export",
-        decl_builtin::<export::ExportCommand, SE>().special(),
-    );
+    shell.register_builtin("export", builtin::<export::ExportCommand, SE>().special());
     #[cfg(feature = "builtin.return")]
     shell.register_builtin("return", builtin::<return_::ReturnCommand, SE>().special());
     #[cfg(feature = "builtin.set")]
@@ -66,7 +63,7 @@ pub fn register_default_builtins<SE: brush_core::ShellExtensions>(
     #[cfg(feature = "builtin.declare")]
     shell.register_builtin(
         "readonly",
-        decl_builtin::<declare::DeclareCommand, SE>().special(),
+        builtin::<declare::DeclareCommand, SE>().special(),
     );
     #[cfg(feature = "builtin.times")]
     shell.register_builtin("times", builtin::<times::TimesCommand, SE>().special());
@@ -84,7 +81,7 @@ pub fn register_default_builtins<SE: brush_core::ShellExtensions>(
     #[cfg(feature = "builtin.command")]
     shell.register_builtin("command", builtin::<command::CommandCommand, SE>());
     #[cfg(feature = "builtin.false")]
-    shell.register_builtin("false", simple_builtin::<false_::FalseCommand, SE>());
+    shell.register_builtin("false", builtin::<false_::FalseCommand, SE>());
     #[cfg(feature = "builtin.fg")]
     shell.register_builtin("fg", builtin::<fg::FgCommand, SE>());
     #[cfg(feature = "builtin.getopts")]
@@ -98,13 +95,13 @@ pub fn register_default_builtins<SE: brush_core::ShellExtensions>(
     #[cfg(all(feature = "builtin.kill", unix))]
     shell.register_builtin("kill", builtin::<kill::KillCommand, SE>());
     #[cfg(feature = "builtin.declare")]
-    shell.register_builtin("local", decl_builtin::<declare::DeclareCommand, SE>());
+    shell.register_builtin("local", builtin::<declare::DeclareCommand, SE>());
     #[cfg(feature = "builtin.pwd")]
     shell.register_builtin("pwd", builtin::<pwd::PwdCommand, SE>());
     #[cfg(feature = "builtin.read")]
     shell.register_builtin("read", builtin::<read::ReadCommand, SE>());
     #[cfg(feature = "builtin.true")]
-    shell.register_builtin("true", simple_builtin::<true_::TrueCommand, SE>());
+    shell.register_builtin("true", builtin::<true_::TrueCommand, SE>());
     #[cfg(feature = "builtin.type")]
     shell.register_builtin("type", builtin::<type_::TypeCommand, SE>());
     #[cfg(all(feature = "builtin.ulimit", unix))]
@@ -121,9 +118,9 @@ pub fn register_default_builtins<SE: brush_core::ShellExtensions>(
 
     if matches!(set, BuiltinSet::BashMode) {
         #[cfg(feature = "builtin.builtin")]
-        shell.register_builtin("builtin", raw_arg_builtin::<builtin_::BuiltinCommand, SE>());
+        shell.register_builtin("builtin", builtin::<builtin_::BuiltinCommand, SE>());
         #[cfg(feature = "builtin.declare")]
-        shell.register_builtin("declare", decl_builtin::<declare::DeclareCommand, SE>());
+        shell.register_builtin("declare", builtin::<declare::DeclareCommand, SE>());
         #[cfg(feature = "builtin.echo")]
         shell.register_builtin("echo", builtin::<echo::EchoCommand, SE>());
         #[cfg(feature = "builtin.enable")]
@@ -147,7 +144,7 @@ pub fn register_default_builtins<SE: brush_core::ShellExtensions>(
         #[cfg(feature = "builtin.test")]
         shell.register_builtin("[", builtin::<test::TestCommand, SE>());
         #[cfg(feature = "builtin.declare")]
-        shell.register_builtin("typeset", decl_builtin::<declare::DeclareCommand, SE>());
+        shell.register_builtin("typeset", builtin::<declare::DeclareCommand, SE>());
 
         // Completion builtins
         #[cfg(feature = "builtin.complete")]
