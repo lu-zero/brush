@@ -499,6 +499,9 @@ pub mod async_file {
     }
 
     /// Wraps a shared pipe reader (read end) for synchronous-through-`Arc` async reads.
+    ///
+    /// Reads go through `sys::pipe_io`, so a read that would block doesn't hold
+    /// up the task writing the pipe's other end.
     pub struct SharedPipeReader(Arc<std::io::PipeReader>);
 
     impl AsyncRead for SharedPipeReader {
@@ -507,13 +510,16 @@ pub mod async_file {
             _cx: &mut Context<'_>,
             buf: &mut ReadBuf<'_>,
         ) -> Poll<io::Result<()>> {
-            let n = self.get_mut().0.as_ref().read(buf.initialize_unfilled())?;
+            let n = crate::sys::pipe_io::read(&self.get_mut().0, buf.initialize_unfilled())?;
             buf.advance(n);
             Poll::Ready(Ok(()))
         }
     }
 
     /// Wraps a shared pipe writer (write end) for synchronous-through-`Arc` async writes.
+    ///
+    /// Writes go through `sys::pipe_io`, so a write to a full pipe doesn't hold
+    /// up the task reading its other end.
     pub struct SharedPipeWriter(Arc<std::io::PipeWriter>);
 
     impl AsyncWrite for SharedPipeWriter {
@@ -522,7 +528,7 @@ pub mod async_file {
             _cx: &mut Context<'_>,
             buf: &[u8],
         ) -> Poll<io::Result<usize>> {
-            Poll::Ready(self.get_mut().0.as_ref().write(buf))
+            Poll::Ready(crate::sys::pipe_io::write(&self.get_mut().0, buf))
         }
 
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
