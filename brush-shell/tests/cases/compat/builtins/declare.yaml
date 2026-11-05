@@ -635,7 +635,6 @@ cases:
       echo "${#arr[@]}"
 
   - name: "Single-quoted compound value in parsed assignment is reparsed"
-    known_failure: true # TODO: declare improvements required
     stdin: |
       X="a b"
       declare -a arr='(${X})'
@@ -669,7 +668,6 @@ cases:
       declare -p arr
 
   - name: "Quoted array assignment does not execute value as shell code"
-    known_failure: true # TODO: declare improvements required
     stdin: |
       payload='(x); printf "INJECTED\n"; #'
       declare -a "arr=$payload"
@@ -684,7 +682,6 @@ cases:
       declare -p arr
 
   - name: "Quoted array assignment applies uppercase attribute"
-    known_failure: true # TODO: declare improvements required
     stdin: |
       declare -au 'arr=(ab Cd)'
       declare -p arr
@@ -697,14 +694,12 @@ cases:
       declare -p arr
 
   - name: "Quoted assignment uses existing indexed array type"
-    known_failure: true # TODO: declare improvements required
     stdin: |
       arr=(old)
       declare 'arr=(new values)'
       declare -p arr
 
   - name: "Quoted assignment uses existing associative array type"
-    known_failure: true # TODO: declare improvements required
     stdin: |
       declare -A map=([old]=value)
       declare 'map=([new]=value [other]=two)'
@@ -745,7 +740,6 @@ cases:
       declare -p arr
 
   - name: "Single-quoted nonzero indexed element assignment"
-    known_failure: true # TODO: declare improvements required
     stdin: |
       declare 'arr[5]=hello'
       declare -p arr
@@ -757,7 +751,6 @@ cases:
       declare -p arr
 
   - name: "Single-quoted associative element append assignment"
-    known_failure: true # TODO: declare improvements required
     stdin: |
       declare -A map=([key]=one)
       declare 'map[key]+=two'
@@ -791,14 +784,12 @@ cases:
       declare -p arr
 
   - name: "Single-quoted parameter-expanded associative element assignment"
-    known_failure: true # TODO: declare improvements required
     stdin: |
       key="space key"
       declare -A 'map[$key]=value'
       declare -p map
 
   - name: "Single-quoted indexed subscript expands without re-expanding value"
-    known_failure: true # TODO: declare improvements required
     stdin: |
       index=2
       value=expanded
@@ -806,7 +797,6 @@ cases:
       declare -p arr
 
   - name: "Single-quoted associative subscript expands without re-expanding value"
-    known_failure: true # TODO: declare improvements required
     stdin: |
       key="space key"
       value=expanded
@@ -842,7 +832,6 @@ cases:
       declare -p arr
 
   - name: "Single-quoted associative array assignment"
-    known_failure: true # TODO: declare improvements required
     stdin: |
       declare -A 'map=([alpha]=one [beta]=two)' 2>/dev/null
       echo "status: $?"
@@ -958,7 +947,6 @@ cases:
       declare -p x
 
   - name: "Assignment value containing brackets is preserved"
-    known_failure: true # TODO: declare improvements required
     stdin: |
       declare 'a[1]=v[2]'
       declare -p a
@@ -1024,7 +1012,6 @@ cases:
       declare -p m
 
   - name: "Quoted element subscript is expanded exactly once"
-    known_failure: true # TODO: declare improvements required
     stdin: |
       key='$(echo SECOND)'
       declare -A m
@@ -1224,7 +1211,6 @@ cases:
       f() { local 1x=2 2>&1 | strip; }; f
 
   - name: "Quoted declaration with = in its subscript"
-    known_failure: true # TODO(declare): a quoted declaration whose subscript contains `=` isn't assigned
     ignore_stderr: true
     stdin: |
       declare -A m
@@ -1252,7 +1238,6 @@ cases:
       $cmd w=$v; declare -p w
 
   - name: "A quoted declaration's subscript is expanded and evaluated"
-    known_failure: true # TODO(declare): a word operand's subscript is used as written
     stdin: |
       i=3
       declare 'a[$i]=x'
@@ -1524,3 +1509,54 @@ cases:
       v=TVAR
       typeset ${v}="tval"
       echo "TVAR=[$TVAR]"
+
+  #
+  # An operand that expands into an assignment, such as one in quotes, is an assignment the parser
+  # couldn't see: `declare` reads it itself. A scalar value is taken as it is, with no further
+  # expansion. A parenthesized value given to an array is read as the array's elements, which are
+  # expanded as in any array assignment. The value is only ever read as elements, never as
+  # commands.
+  #
+  - name: "a quoted operand with a parenthesized value assigns an array"
+    stdin: |
+      declare -a "arr=( a 'b c' )"; declare -p arr
+      declare -a 'arr=([3]=x y)'; declare -p arr
+      declare -a 'app=(1)'; declare -a 'app+=(2)'; declare -p app
+      declare -A 'assoc=([k]=v)'; declare -p assoc
+      existing=(1); declare 'existing=(2 3)'; declare -p existing
+
+  - name: "a quoted array value's elements are expanded once"
+    stdin: |
+      X='$(echo expanded twice)'
+      declare -a 'arr=($X)'
+      declare -p arr
+
+  - name: "a quoted parenthesized value is a scalar unless it goes to an array"
+    stdin: |
+      declare 'scalar=(1 2 3)'; declare -p scalar
+      f() { local 'lscalar=(1 2)'; declare -p lscalar; }; f
+      declare -a 'tail=(1 2) x'; declare -p tail
+      declare -a 'open=(1 2'; declare -p open
+
+  - name: "a quoted array value is never read as commands"
+    stdin: |
+      declare -a 'arr=(x); echo ran'; declare -p arr
+      declare -a 'arr;echo ran=(1)' 2>/dev/null; echo "status: $?"
+
+  - name: "a quoted array value that doesn't parse assigns nothing and fails"
+    ignore_stderr: true # bash also abandons the rest of the line here
+    stdin: |
+      declare -a 'arr=(1 2) $(echo x)'
+      echo "status: $?"
+      declare -p arr
+
+  - name: "local and readonly take quoted assignments"
+    stdin: |
+      f() {
+        X="a b"
+        local -a 'arr=(${X})'
+        declare -p arr
+      }
+      f
+      readonly -a 'ro=(1 2)'
+      declare -p ro
