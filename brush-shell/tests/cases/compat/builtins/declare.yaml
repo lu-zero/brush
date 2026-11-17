@@ -1390,3 +1390,11 @@ cases:
       declare -p c
       f() { local x=1 -r 2>/dev/null; echo "local: $?"; x=2; declare -p x; }
       f
+
+  - name: "Displaying a function with a process substitution"
+    stdin: |
+      f() { cat <(echo hi); }
+      # A doubled opening parenthesis would read back as arithmetic.
+      declare -f f | grep -cF '(('
+      eval "$(declare -f f)"
+      f

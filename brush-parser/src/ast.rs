@@ -1409,9 +1409,8 @@ impl WriteSource for CommandPrefixOrSuffixItem {
             Self::Word(word) => write!(w, "{word}"),
             Self::AssignmentWord(_assignment, word) => write!(w, "{word}"),
             Self::ProcessSubstitution(kind, subshell_command) => {
-                write!(w, "{kind}(")?;
-                subshell_command.write_source(w)?;
-                write!(w, ")")
+                write!(w, "{kind}")?;
+                subshell_command.write_source(w)
             }
         }
     }
