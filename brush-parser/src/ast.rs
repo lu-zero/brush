@@ -3,98 +3,12 @@
 
 use std::fmt::{Display, Write};
 
+mod format;
+
+use format::{DEFAULT_INDENT_WIDTH, SourceWriter, WriteSource, display_via_source_writer};
+pub use format::{Formattable, Formatted, FormattedBuilder};
+
 use crate::{SourceSpan, tokenizer};
-
-const DISPLAY_INDENT: &str = "    ";
-
-/// Writes AST nodes back out as shell source text, carrying the state of one write in
-/// progress: how far new lines are indented, and the here-documents whose bodies are still
-/// to be written.
-///
-/// Text written through [`std::fmt::Write`] goes out unchanged. Only [`Self::newline`]
-/// starts a new line, indents it, and writes the pending here-documents before it. A line
-/// break inside a word (such as in a multi-line quoted string) is thus never followed by
-/// indentation, and a here-document's body and closing delimiter start at the beginning of
-/// the line after the command that redirects from it, where the shell reads them back.
-struct SourceWriter<'w, 'n> {
-    out: &'w mut dyn Write,
-    indent: usize,
-    pending_here_docs: Vec<&'n IoHereDocument>,
-}
-
-impl<'w, 'n> SourceWriter<'w, 'n> {
-    /// Writes `node` as source text to `out`, along with any here-document bodies it still
-    /// owes at the end.
-    fn write_node(out: &'w mut dyn Write, node: &'n impl WriteSource) -> std::fmt::Result {
-        let mut w = Self {
-            out,
-            indent: 0,
-            pending_here_docs: vec![],
-        };
-        node.write_source(&mut w)?;
-        w.write_pending_here_docs()
-    }
-
-    /// Ends the current line and starts the next one at the current indentation, writing
-    /// any pending here-document bodies in between.
-    fn newline(&mut self) -> std::fmt::Result {
-        self.write_pending_here_docs()?;
-        self.out.write_char('\n')?;
-        for _ in 0..self.indent {
-            self.out.write_str(DISPLAY_INDENT)?;
-        }
-        Ok(())
-    }
-
-    /// Writes the bodies and closing delimiters of the pending here-documents, each on the
-    /// lines that follow the current one, in the order they were redirected from.
-    fn write_pending_here_docs(&mut self) -> std::fmt::Result {
-        if self.pending_here_docs.is_empty() {
-            return Ok(());
-        }
-
-        self.out.write_char('\n')?;
-        for here_doc in std::mem::take(&mut self.pending_here_docs) {
-            self.out.write_str(&here_doc.doc.value)?;
-            self.out.write_str(&here_doc.closing_delimiter())?;
-            self.out.write_char('\n')?;
-        }
-        Ok(())
-    }
-
-    /// Calls `f` with new lines indented one more level than they are now.
-    fn indented(&mut self, f: impl FnOnce(&mut Self) -> std::fmt::Result) -> std::fmt::Result {
-        self.indent += 1;
-        let result = f(self);
-        self.indent -= 1;
-        result
-    }
-}
-
-impl Write for SourceWriter<'_, '_> {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        self.out.write_str(s)
-    }
-}
-
-/// Implemented by AST nodes that write themselves as source text through a
-/// [`SourceWriter`], so that the nodes inside them share its state.
-trait WriteSource {
-    fn write_source<'n>(&'n self, w: &mut SourceWriter<'_, 'n>) -> std::fmt::Result;
-}
-
-/// Implements [`Display`] for nodes that implement [`WriteSource`].
-macro_rules! display_via_source_writer {
-    ($($node:ty),+ $(,)?) => {
-        $(
-            impl Display for $node {
-                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                    SourceWriter::write_node(f, self)
-                }
-            }
-        )+
-    };
-}
 
 display_via_source_writer!(
     Program,
@@ -866,7 +780,7 @@ impl CompoundList {
             // want on the last list item, or that would come right before here-document
             // bodies, which end the line anyway.
             let is_sequence = matches!(item.1, SeparatorOperator::Sequence);
-            let ends_line_with_here_docs = !w.pending_here_docs.is_empty();
+            let ends_line_with_here_docs = w.has_pending_here_docs();
             if !is_sequence
                 || ((keep_trailing_separator || i < self.0.len() - 1) && !ends_line_with_here_docs)
             {
@@ -1864,7 +1778,7 @@ impl WriteSource for IoHereDocument {
             )?;
         }
 
-        w.pending_here_docs.push(self);
+        w.defer_here_doc(self);
 
         Ok(())
     }
@@ -2544,6 +2458,26 @@ mod tests {
         let reader = BufReader::new(input.as_bytes());
         let mut parser = crate::Parser::new(reader, &ParserOptions::default());
         parser.parse_program().unwrap()
+    }
+
+    #[test]
+    fn formatted_indentation() {
+        let program = parse("if true; then\necho hi;\nfi");
+
+        assert_eq!(program.to_string(), "if true; then\n    echo hi;\nfi");
+        assert_eq!(program.formatted().to_string(), program.to_string());
+        assert_eq!(
+            program.formatted().indent_width(2).to_string(),
+            "if true; then\n  echo hi;\nfi"
+        );
+        assert_eq!(
+            program
+                .formatted()
+                .indent_level(1)
+                .indent_width(2)
+                .to_string(),
+            "if true; then\n    echo hi;\n  fi"
+        );
     }
 
     #[test]
